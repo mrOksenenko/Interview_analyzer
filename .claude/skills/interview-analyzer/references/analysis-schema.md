@@ -1,11 +1,13 @@
 # Схема `progress/sessions/<id>.analysis.json`
 
-Обязательные поля: `session_id`, `date`, `level`, `errors`, `answers`, `topics`.
+Обязательные поля: `session_id`, `project`, `date`, `level`, `errors`, `answers`, `topics`.
+`project` — id проекта (из `meta.json` записи или `progress.py project list`); проект должен существовать.
 Остальное — по возможности. Проверяет `scripts/progress.py ingest`.
 
 ```json
 {
-  "session_id": "2026-11-12-acme",
+  "session_id": "2026-11-12-acme-1",
+  "project": "acme",
   "date": "2026-11-12",
   "role": "Backend Developer, Acme",
   "level": {
@@ -58,6 +60,7 @@
 - `overall` — итог интервью. `content`/`english` = среднее по содержательным ответам, `total` = среднее
   этих двух. Скрипт досчитывает недостающее сам; `summary` пишет Claude после анализа всего блока.
 - `topics[].type` — `grammar` (языковая тема) или `knowledge` (содержательная). Тема = 1 понятие, которое можно выучить и проверить; не «грамматика вообще».
-  Название темы держи **стабильным между сессиями** (тот же текст → скрипт распознает возврат ошибки).
+  Название темы держи **стабильным между интервью одного проекта** (тот же текст → скрипт распознает повтор и возврат ошибки;
+  ключ темы = `<project>/<type>:<slug названия>`). Одна и та же тема в разных проектах — разные темы.
 - `candidate_word_count` — если не указан, скрипт считает по строкам `Candidate:` в
   `progress/transcripts/<id>.labeled.md`.

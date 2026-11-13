@@ -1,12 +1,13 @@
 # Схема `progress/plans/<topic-slug>.lesson.json`
 
-`<topic-slug>` — ключ темы без префикса: для `grammar:present-perfect-for-duration…` файл
-`present-perfect-for-duration….lesson.json`. Ключи смотри: `python3 scripts/progress.py topics`.
+Путь: `progress/plans/<project_id>/<topic-slug>.lesson.json`, где ключ темы `<project_id>/<type>:<topic-slug>`
+(пример: тема `acme/grammar:present-perfect` → `progress/plans/acme/present-perfect.lesson.json`).
+Ключи смотри: `python3 scripts/progress.py topics <project_id>`.
 Приложение (`./start.sh`) читает эти файлы: без них у темы нет кнопок «Урок» и «Тест».
 
 ```json
 {
-  "topic": "grammar:present-perfect-for-duration-present-simple-for-routines",
+  "topic": "acme/grammar:present-perfect-for-duration-present-simple-for-routines",
   "title": "Времена: Present Perfect и Present Simple",
   "intro": "1–2 предложения: что пользователь сказал на интервью и что разберём.",
   "rule": [

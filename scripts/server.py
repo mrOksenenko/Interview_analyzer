@@ -4,11 +4,14 @@
     ./start.sh            # или: python3 scripts/server.py [--port 8765] [--no-open]
 
 API:
-    GET  /api/state                 прогресс, игра, анализы интервью, что пора проверить
-    GET  /api/lesson?key=<topic>    урок по теме (progress/plans/<slug>.lesson.json)
-    POST /api/practice              {topic, correct, total} → XP и серия дней
-    POST /api/test                  {topic, score, correct, total} → запись проверки (progress.py check)
-    POST /api/review                {topic, prompt, answer} → «мой вариант тоже верный», в progress/inbox/
+    GET  /api/state                     проекты, интервью, темы, игра, ожидающие записи
+    GET  /api/jobs                      статус расшифровок (для опроса)
+    GET  /api/lesson?key=<topic>        урок по теме (progress/plans/<проект>/<тема>.lesson.json)
+    POST /api/upload?...                сырое аудио в теле запроса → проект + расшифровка в фоне
+    POST /api/retry                     {session_id} повторить расшифровку сохранённого аудио
+    POST /api/practice                  {topic, correct, total} → XP и серия дней
+    POST /api/test                      {topic, correct, total} → запись проверки (progress.py check)
+    POST /api/review                    {topic, prompt, answer} → «мой вариант тоже верный»
 """
 from __future__ import annotations
 
@@ -17,9 +20,12 @@ import contextlib
 import datetime as dt
 import io
 import json
+import os
 import re
+import subprocess
 import sys
 import threading
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,13 +37,24 @@ import progress as P  # noqa: E402
 APP = P.ROOT / "app"
 PLANS = P.PROG / "plans"
 SESSIONS = P.PROG / "sessions"
+AUDIO = P.PROG / "audio"
+TRANSCRIPTS = P.PROG / "transcripts"
 INBOX = P.PROG / "inbox"
 GAME = P.PROG / "game.json"
+VENV_PY = P.ROOT / ".venv" / "bin" / "python"
 LOCK = threading.Lock()
+JOBS: dict = {}                     # session_id → {stage, pos, dur, error, started}
+TRANSCRIBE_SLOT = threading.Semaphore(1)   # одна расшифровка за раз
 MAX_BODY = 1_000_000
+MAX_UPLOAD = 2 * 1024 ** 3
+AUDIO_EXT = {".mp3", ".m4a", ".wav", ".mp4", ".webm", ".ogg", ".oga", ".opus", ".flac", ".aac",
+             ".mov", ".mkv", ".aiff", ".caf"}
+MODELS = {"tiny", "base", "small", "medium", "large-v3"}
+DEVICES = {"auto", "cpu", "mps"}
 TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".json": "application/json"}
 XP_PER_LEVEL = 100
+TOPIC_RE = re.compile(r"[a-z0-9а-яё-]+/(grammar|knowledge):[a-z0-9а-яё-]+")
 
 
 # ---------- игра: XP и серия дней ----------
@@ -74,9 +91,10 @@ def game_view(game: dict) -> dict:
 
 # ---------- данные ----------
 def lesson_path(key: str) -> Path | None:
-    if not re.fullmatch(r"(grammar|knowledge):[a-z0-9а-яё-]+", key):
+    if not TOPIC_RE.fullmatch(key):
         return None
-    return PLANS / f"{key.split(':', 1)[1]}.lesson.json"
+    pid, rest = key.split("/", 1)
+    return PLANS / pid / f"{rest.split(':', 1)[1]}.lesson.json"
 
 
 def build_state() -> dict:
@@ -87,20 +105,99 @@ def build_state() -> dict:
             sessions.append(json.loads(f.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             continue
-    ov = {x["id"]: x.get("overall") for x in state["sessions"]}
+    done = {x["id"]: x for x in state["sessions"]}
     for s in sessions:                      # итог, посчитанный progress.py, надёжнее ручного
-        s["overall"] = {**(s.get("overall") or {}), **(ov.get(s.get("session_id")) or {})}
-    sessions.sort(key=lambda s: s.get("date", ""))
+        rec = done.get(s.get("session_id"), {})
+        s["overall"] = {**(s.get("overall") or {}), **(rec.get("overall") or {})}
+        s["title"] = rec.get("title") or s.get("title", "")
+    sessions.sort(key=lambda s: (s.get("date", ""), s.get("session_id", "")))
     lessons = {k: bool((lesson_path(k) or Path("/nonexistent")).exists()) for k in state["topics"]}
     return {"progress": state, "game": game_view(load_game()), "sessions": sessions,
+            "pending": pending_view(state), "jobs": JOBS,
             "due": [k for k, _ in P.due_topics(state)], "lessons": lessons,
             "today": dt.date.today().isoformat(), "pass_score": P.PASS_SCORE,
             "mastered_stage": P.MASTERED_STAGE}
 
 
+def pending_view(state: dict) -> list:
+    out = []
+    for m in P.pending_interviews(state):
+        out.append({**m, "has_transcript": (TRANSCRIPTS / f"{m['id']}.md").exists(),
+                    "project_name": state["projects"].get(m["project"], {}).get("name", m["project"])})
+    return out
+
+
+# ---------- расшифровка в фоне ----------
+def set_meta(sid: str, **upd) -> None:
+    m = P.read_meta(sid)
+    if m:
+        m.update(upd)
+        P.write_meta(m)
+
+
+def run_transcription(sid: str) -> None:
+    meta = P.read_meta(sid)
+    JOBS[sid] = {"stage": "queued", "pos": 0, "dur": 0, "error": None}
+    with TRANSCRIBE_SLOT:
+        try:
+            if not VENV_PY.exists():
+                raise RuntimeError("Не установлена расшифровка. Запусти ./setup.sh")
+            audio = P.ROOT / meta["audio"]
+            JOBS[sid].update(stage="loading")
+            set_meta(sid, status="transcribing", error=None)
+            proc = subprocess.Popen(
+                [str(VENV_PY), str(P.ROOT / "scripts" / "transcribe.py"), str(audio), "--id", sid,
+                 "--model", meta.get("model", "small"), "--device", meta.get("device", "auto")],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(P.ROOT))
+            tail = []
+            buf = b""
+            while True:
+                chunk = proc.stderr.read(256)
+                if not chunk:
+                    break
+                buf += chunk
+                parts = re.split(rb"[\r\n]", buf)
+                buf = parts.pop()
+                for raw in parts:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line:
+                        continue
+                    m = re.match(r"(\d\d):(\d\d) / (\d\d):(\d\d)", line)
+                    if m:
+                        a, b, c, d = map(int, m.groups())
+                        JOBS[sid].update(stage="transcribing", pos=a * 60 + b, dur=c * 60 + d)
+                    elif "Транскрибирую" in line:
+                        JOBS[sid].update(stage="transcribing")
+                    elif "Warning" not in line and "HF_TOKEN" not in line:
+                        tail = (tail + [line])[-6:]
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(" | ".join(tail[-3:]) or f"transcribe.py завершился с кодом {proc.returncode}")
+            stats = json.loads((TRANSCRIPTS / f"{sid}.json").read_text(encoding="utf-8")).get("stats", {})
+            set_meta(sid, status="transcribed", stats=stats, error=None)
+            JOBS[sid].update(stage="done", pos=JOBS[sid].get("dur", 0))
+        except Exception as e:  # noqa: BLE001
+            set_meta(sid, status="failed", error=str(e)[:300])
+            JOBS[sid].update(stage="failed", error=str(e)[:300])
+
+
+def start_job(sid: str) -> None:
+    threading.Thread(target=run_transcription, args=(sid,), daemon=True).start()
+
+
+def mark_interrupted() -> None:
+    for f in SESSIONS.glob("*.meta.json"):
+        try:
+            m = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if m.get("status") in ("transcribing", "uploaded"):
+            set_meta(m["id"], status="failed", error="Прервано перезапуском сервера. Нажми «Повторить».")
+
+
 # ---------- HTTP ----------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "InterviewCoach/1.0"
+    server_version = "InterviewCoach/2.0"
 
     def log_message(self, fmt, *args):  # тише в консоли
         pass
@@ -135,6 +232,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/state":
             with LOCK:
                 return self._json(200, build_state())
+        if u.path == "/api/jobs":
+            with LOCK:
+                return self._json(200, {"jobs": JOBS, "pending": pending_view(P.load())})
         if u.path == "/api/lesson":
             key = (parse_qs(u.query).get("key") or [""])[0]
             f = lesson_path(key)
@@ -147,9 +247,75 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not found"})
         self._send(200, target.read_bytes(), TYPES.get(target.suffix, "application/octet-stream"))
 
+    # ----- загрузка аудио -----
+    def _upload(self, query: dict) -> None:
+        q = {k: (v[0] if v else "") for k, v in query.items()}
+        fname = os.path.basename(q.get("filename", "") or "recording.webm")
+        ext = Path(fname).suffix.lower()
+        mode = q.get("mode", "new")
+        model, device = q.get("model", "small"), q.get("device", "auto")
+        title = " ".join((q.get("title") or Path(fname).stem).split())[:80]
+        pname = " ".join((q.get("project_name") or "").split())[:80]
+        pid = q.get("project", "")
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            size = 0
+        if ext not in AUDIO_EXT:
+            return self._json(400, {"error": f"Формат {ext or '?'} не поддерживается. Подойдут: mp3, m4a, wav, mp4, webm, ogg, flac."})
+        if mode not in ("new", "existing") or model not in MODELS or device not in DEVICES:
+            return self._json(400, {"error": "Неверные параметры загрузки."})
+        if mode == "new" and not pname:
+            return self._json(400, {"error": "Назови проект."})
+        if not 0 < size <= MAX_UPLOAD:
+            return self._json(413, {"error": "Файл пустой или больше 2 ГБ."})
+        if mode == "existing" and pid not in P.load()["projects"]:
+            return self._json(404, {"error": "Такого проекта нет."})
+
+        AUDIO.mkdir(parents=True, exist_ok=True)
+        tmp = AUDIO / f".upload-{uuid.uuid4().hex}.part"
+        got = 0
+        try:
+            with open(tmp, "wb") as fh:
+                while got < size:
+                    chunk = self.rfile.read(min(1 << 20, size - got))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    got += len(chunk)
+            if got != size:
+                tmp.unlink(missing_ok=True)
+                return self._json(400, {"error": "Загрузка оборвалась. Попробуй ещё раз."})
+            with LOCK:
+                state = P.load()
+                if mode == "new":
+                    pid = P.new_project(state, pname)
+                proj = state["projects"][pid]
+                n = len(proj["sessions"]) + 1
+                today = dt.date.today().isoformat()
+                sid = f"{today}-{pid}-{n}"
+                while (SESSIONS / f"{sid}.meta.json").exists():
+                    n += 1
+                    sid = f"{today}-{pid}-{n}"
+                final = AUDIO / f"{sid}{ext}"
+                os.replace(tmp, final)
+                proj["sessions"].append(sid)
+                P.save(state)
+                P.write_meta({"id": sid, "project": pid, "project_name": proj["name"], "mode": mode,
+                              "title": title, "created": today, "audio": str(final.relative_to(P.ROOT)),
+                              "model": model, "device": device, "status": "uploaded",
+                              "original_name": fname})
+            start_job(sid)
+            return self._json(200, {"session_id": sid, "project": pid, "project_name": proj["name"], "mode": mode})
+        finally:
+            tmp.unlink(missing_ok=True)
+
     def do_POST(self):
         if not self._local_ok():
             return self._json(403, {"error": "forbidden"})
+        u = urlparse(self.path)
+        if u.path == "/api/upload":
+            return self._upload(parse_qs(u.query))
         try:
             n = int(self.headers.get("Content-Length") or 0)
             if n > MAX_BODY:
@@ -157,9 +323,17 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             return self._json(400, {"error": "bad json"})
-        path = urlparse(self.path).path
+        path = u.path
         with LOCK:
             state = P.load()
+            if path == "/api/retry":
+                sid = str(body.get("session_id", ""))
+                meta = P.read_meta(sid)
+                if not meta or meta.get("status") != "failed" or not (P.ROOT / (meta.get("audio") or "x")).exists():
+                    return self._json(404, {"error": "Нечего повторять."})
+                set_meta(sid, status="uploaded", error=None)
+                start_job(sid)
+                return self._json(200, {"ok": True})
             topic = body.get("topic")
             if topic not in state["topics"]:
                 return self._json(404, {"error": "unknown topic"})
@@ -220,6 +394,7 @@ def main() -> int:
     except OSError as e:
         print(f"Порт {a.port} занят ({e}). Попробуй: --port 8766", file=sys.stderr)
         return 1
+    mark_interrupted()
     url = f"http://127.0.0.1:{a.port}/"
     print(f"Приложение: {url}  (Ctrl+C — остановить)")
     if not a.no_open:

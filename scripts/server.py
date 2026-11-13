@@ -12,6 +12,9 @@ API:
     POST /api/practice                  {topic, correct, total} → XP и серия дней
     POST /api/test                      {topic, correct, total} → запись проверки (progress.py check)
     POST /api/review                    {topic, prompt, answer} → «мой вариант тоже верный»
+    POST /api/vocab/answer              {id, ok, claimed?, answer?} → статус слова, XP
+    POST /api/vocab/status              {id, status: learning|learned|known}
+    POST /api/vocab/finish              {correct} → бонус за завершённый тест слов
 """
 from __future__ import annotations
 
@@ -41,6 +44,8 @@ AUDIO = P.PROG / "audio"
 TRANSCRIPTS = P.PROG / "transcripts"
 INBOX = P.PROG / "inbox"
 GAME = P.PROG / "game.json"
+VOCAB_DIR = P.PROG / "vocab"
+VOCAB_STATE = P.PROG / "vocab_state.json"
 VENV_PY = P.ROOT / ".venv" / "bin" / "python"
 LOCK = threading.Lock()
 JOBS: dict = {}                     # session_id → {stage, pos, dur, error, started}
@@ -114,6 +119,7 @@ def build_state() -> dict:
     lessons = {k: bool((lesson_path(k) or Path("/nonexistent")).exists()) for k in state["topics"]}
     return {"progress": state, "game": game_view(load_game()), "sessions": sessions,
             "pending": pending_view(state), "jobs": JOBS,
+            "vocab": {"items": load_vocab_items(), "state": load_vocab_state()},
             "due": [k for k, _ in P.due_topics(state)], "lessons": lessons,
             "today": dt.date.today().isoformat(), "pass_score": P.PASS_SCORE,
             "mastered_stage": P.MASTERED_STAGE}
@@ -125,6 +131,50 @@ def pending_view(state: dict) -> list:
         out.append({**m, "has_transcript": (TRANSCRIPTS / f"{m['id']}.md").exists(),
                     "project_name": state["projects"].get(m["project"], {}).get("name", m["project"])})
     return out
+
+
+# ---------- словарь ----------
+def load_vocab_items() -> list:
+    """Слова из progress/vocab/<проект>.vocab.json; битые записи пропускаются."""
+    out, seen = [], set()
+    for f in sorted(VOCAB_DIR.glob("*.vocab.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        pid = data.get("project") or f.name.split(".")[0]
+        for it in data.get("items", []):
+            en, ru = str(it.get("en", "")).strip(), str(it.get("ru", "")).strip()
+            if not en or not ru:
+                continue
+            vid = f"{pid}/{P.slug(en)}"
+            if vid in seen:
+                continue
+            seen.add(vid)
+            acc = [ru] + [str(a) for a in it.get("accepted", []) if str(a).strip()]
+            out.append({"id": vid, "project": pid, "en": en, "kind": it.get("kind", "word"), "ru": ru,
+                        "accepted": list(dict.fromkeys(acc)), "example": it.get("example", ""),
+                        "example_ru": it.get("example_ru", ""), "note": it.get("note", ""),
+                        "source": it.get("source")})
+    return out
+
+
+def load_vocab_state() -> dict:
+    if VOCAB_STATE.exists():
+        try:
+            return json.loads(VOCAB_STATE.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+    return {"words": {}}
+
+
+def save_vocab_state(vs: dict) -> None:
+    P.PROG.mkdir(parents=True, exist_ok=True)
+    VOCAB_STATE.write_text(json.dumps(vs, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def vocab_word(vs: dict, vid: str) -> dict:
+    return vs["words"].setdefault(vid, {"status": "new", "seen": 0, "correct": 0, "wrong": 0, "streak": 0, "last": None})
 
 
 # ---------- расшифровка в фоне ----------
@@ -310,6 +360,60 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             tmp.unlink(missing_ok=True)
 
+    def _vocab(self, path: str, body: dict) -> None:
+        """Ответы на слова. Вызывается под LOCK."""
+        vid = str(body.get("id", ""))
+        if path != "/api/vocab/finish" and vid not in {i["id"] for i in load_vocab_items()}:
+            return self._json(404, {"error": "unknown word"})
+        game, vs = load_game(), load_vocab_state()
+        today = dt.date.today().isoformat()
+        if path == "/api/vocab/answer":
+            ok, w = bool(body.get("ok")), vocab_word(vs, vid)
+            prev = w["status"]
+            w["seen"] += 1
+            w["last"] = today
+            if ok:
+                w["correct"] += 1
+                w["streak"] += 1
+                if prev == "new":
+                    w["status"] = "known"
+                elif prev == "learning" and w["streak"] >= 3:
+                    w["status"] = "learned"
+            else:
+                w["wrong"] += 1
+                w["streak"] = 0
+                w["status"] = "learning"
+                w["added"] = w.get("added") or today
+            if body.get("claimed"):               # «мой вариант тоже верный»: пишем для проверки
+                INBOX.mkdir(parents=True, exist_ok=True)
+                with open(INBOX / "vocab_review.jsonl", "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"ts": dt.datetime.now().isoformat(timespec="seconds"), "id": vid,
+                                         "answer": str(body.get("answer", ""))[:200]}, ensure_ascii=False) + "\n")
+            gained = 2 if ok else 0
+            award(game, gained)
+            save_vocab_state(vs)
+            save_game(game)
+            return self._json(200, {"word": w, "learned": prev == "learning" and w["status"] == "learned",
+                                    "xp_gained": gained, "game": game_view(game)})
+        if path == "/api/vocab/status":
+            st = body.get("status")
+            if st not in ("learning", "learned", "known"):
+                return self._json(400, {"error": "bad status"})
+            w = vocab_word(vs, vid)
+            w["status"] = st
+            w["streak"] = 3 if st == "learned" else 0
+            if st == "learning":
+                w["added"] = w.get("added") or today
+            save_vocab_state(vs)
+            return self._json(200, {"word": w})
+        if path == "/api/vocab/finish":
+            n = _int(body.get("correct"))
+            gained = 10 if n >= 0 else 0
+            award(game, gained)
+            save_game(game)
+            return self._json(200, {"xp_gained": gained, "game": game_view(game)})
+        return self._json(404, {"error": "not found"})
+
     def do_POST(self):
         if not self._local_ok():
             return self._json(403, {"error": "forbidden"})
@@ -334,6 +438,8 @@ class Handler(BaseHTTPRequestHandler):
                 set_meta(sid, status="uploaded", error=None)
                 start_job(sid)
                 return self._json(200, {"ok": True})
+            if path.startswith("/api/vocab/"):
+                return self._vocab(path, body)
             topic = body.get("topic")
             if topic not in state["topics"]:
                 return self._json(404, {"error": "unknown topic"})

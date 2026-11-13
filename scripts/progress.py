@@ -12,6 +12,7 @@
     progress.py due                                           # что пора повторить / проверить
     progress.py check <topic_key> <score 0-100> [--note ".."] # записать результат проверки
     progress.py topics [<project_id>]                         # темы с ключами
+    progress.py vocab-check                                   # проверить словари progress/vocab/*.vocab.json
 """
 from __future__ import annotations
 
@@ -193,12 +194,13 @@ def cmd_ingest(path: str) -> int:
     state["error_categories"] = {k: v for k, v in state["error_categories"].items() if v}
 
     # темы проекта; чтобы повторная загрузка не плодила дубли, сначала снимаем эту сессию со всех тем
-    before = {k for k, t in state["topics"].items() if t["project"] == pid and sid not in t["sessions"]}
     for k, t in list(state["topics"].items()):
         if t["project"] == pid and sid in t["sessions"]:
             t["sessions"].remove(sid)
             if not t["sessions"] and not t["checks"]:
                 del state["topics"][k]
+    # темы проекта, существовавшие до этой записи (в том числе при повторной загрузке того же анализа)
+    before = {k for k, t in state["topics"].items() if t["project"] == pid}
     seen, new, relapsed = [], [], []
     for t in data["topics"]:
         key = topic_key(pid, t)
@@ -320,6 +322,40 @@ def cmd_project(action: str, name: str | None) -> int:
     return 0
 
 
+def cmd_vocab_check() -> int:
+    """Проверяет словари: обязательные поля, дубли, непустые варианты перевода."""
+    files = sorted((PROG / "vocab").glob("*.vocab.json"))
+    if not files:
+        print("Словарей нет (progress/vocab/*.vocab.json).")
+        return 0
+    state, bad = load(), 0
+    for f in files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except ValueError as e:
+            print(f"{f.name}: не JSON ({e})", file=sys.stderr)
+            bad += 1
+            continue
+        pid, seen = data.get("project"), set()
+        if pid not in state["projects"]:
+            print(f"{f.name}: проект '{pid}' не существует", file=sys.stderr)
+            bad += 1
+        for it in data.get("items", []):
+            en = str(it.get("en", "")).strip()
+            if not en or not str(it.get("ru", "")).strip():
+                print(f"{f.name}: запись без en/ru: {it}", file=sys.stderr)
+                bad += 1
+            elif slug(en) in seen:
+                print(f"{f.name}: дубль '{en}'", file=sys.stderr)
+                bad += 1
+            elif not it.get("accepted") or not it.get("example"):
+                print(f"{f.name}: у '{en}' нет accepted или example", file=sys.stderr)
+                bad += 1
+            seen.add(slug(en))
+        print(f"{f.name}: слов {len(data.get('items', []))}")
+    return 1 if bad else 0
+
+
 def cmd_pending() -> int:
     state = load()
     pend = pending_interviews(state)
@@ -422,7 +458,7 @@ def cmd_status(quiet_header: bool = False) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for n in ("status", "due", "pending"):
+    for n in ("status", "due", "pending", "vocab-check"):
         sub.add_parser(n)
     p = sub.add_parser("topics")
     p.add_argument("project", nargs="?")
@@ -444,7 +480,7 @@ def main() -> int:
         return cmd_topics(a.project)
     if a.cmd == "project":
         return cmd_project(a.action, a.name)
-    return {"status": cmd_status, "due": cmd_due, "pending": cmd_pending}[a.cmd]()
+    return {"status": cmd_status, "due": cmd_due, "pending": cmd_pending, "vocab-check": cmd_vocab_check}[a.cmd]()
 
 
 if __name__ == "__main__":

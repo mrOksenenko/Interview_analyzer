@@ -118,3 +118,12 @@ select{font:600 14px sans-serif;font-family:inherit;padding:8px 10px;border-radi
 .promptbox code{display:block;width:100%;font:600 13px/1.5 ui-monospace,Menlo,monospace;background:var(--card);color:var(--text);border-radius:8px;padding:8px 10px;word-break:break-word}
 .warnbox{background:var(--bad-bg);color:var(--bad-t)}
 details>summary{list-style:none}details>summary::-webkit-details-marker{display:none}
+
+.spk{flex:none;width:40px;height:40px;border:2px solid var(--line);border-bottom-width:4px;background:var(--card);border-radius:12px;font-size:18px;line-height:1;cursor:pointer}
+.spk:active{transform:translateY(2px);border-bottom-width:2px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.metric{background:var(--card);border:2px solid var(--line);border-radius:14px;padding:10px 12px}
+.metric b{display:block;font-size:26px;line-height:1.2}
+.flipcard{margin-top:24px;padding:28px 16px}
+.dock-in.btns{display:flex;gap:10px}
+.btn.grow{flex:1}

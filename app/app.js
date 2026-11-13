@@ -86,18 +86,21 @@ function topbar() {
     <span class="chip" title="Опыт">Ур. ${g.level} <span class="xpbar"><i style="width:${g.xp_in_level / g.xp_per_level * 100}%"></i></span> ${g.xp} XP</span></header>`;
 }
 function tabbar() {
-  const on = v => ({ home: "home", projects: "projects", project: "projects", interview: "projects", topics: "topics" }[view] === v ? "on" : "");
+  const on = v => ({ home: "home", projects: "projects", project: "projects", interview: "projects", topics: "topics", vocab: "vocab" }[view] === v ? "on" : "");
   return `<nav class="tabs"><button class="tab ${on("home")}" data-act="tab" data-v="home"><span>🏠</span>Главная</button>
     <button class="tab ${on("projects")}" data-act="tab" data-v="projects"><span>📁</span>Проекты</button>
     <button class="tab add ${view === "upload" || view === "status" ? "on" : ""}" data-act="newrec"><span>＋</span>Запись</button>
-    <button class="tab ${on("topics")}" data-act="tab" data-v="topics"><span>🧩</span>Темы</button></nav>`;
+    <button class="tab ${on("topics")}" data-act="tab" data-v="topics"><span>🧩</span>Темы</button>
+    <button class="tab ${on("vocab")}" data-act="tab" data-v="vocab"><span>📖</span>Словарь</button></nav>`;
 }
 
 function render(keepScroll) {
   const app = $("#app");
   if (P) { app.innerHTML = playerView(); bindPlayer(); return; }
+  if (V) { app.innerHTML = vplayerView(); bindV(); return; }
+  if (C) { app.innerHTML = cardsView(); return; }
   const y = window.scrollY;
-  const v = { home, projects: projectsView, project: projectView, interview, topics, upload: uploadView, status: statusView }[view];
+  const v = { home, projects: projectsView, project: projectView, interview, topics, upload: uploadView, status: statusView, vocab: vocabView }[view];
   app.innerHTML = topbar() + `<main>${v()}</main>` + tabbar();
   if (view === "upload") bindUpload();
   window.scrollTo(0, keepScroll ? y : 0);
@@ -147,6 +150,13 @@ function home() {
     <button class="btn acc wide" data-act="newrec">＋ Новая запись интервью</button></div>`;
   if (pend.length) h += `<div class="sec">Записи в обработке</div><div class="stack">${pend.map(m => pendingCard(m, true)).join("")}</div>`;
   if (dueNow.length) h += `<div class="sec">Сегодня</div><div class="stack">${dueNow.map(k => topicCard(k, true)).join("")}</div>`;
+  const vi = vitems();
+  if (vi.length) {
+    const cnt = s => vi.filter(w => vst(w.id).status === s).length;
+    h += `<div class="sec">Словарь</div><div class="card topic"><div class="grow stack" style="--g:4px"><div class="q">Слова из твоих интервью</div>
+      <div class="small muted">На изучении: ${cnt("learning")} · новых: ${cnt("new")} · выучено: ${cnt("learned") + cnt("known")}</div></div>
+      <button class="btn pri small" data-act="vtest" data-m="new">Тест на слова</button></div>`;
+  }
   const ps = Object.keys(projects());
   h += `<div class="sec">Проекты</div>`;
   h += ps.length ? `<div class="stack">${ps.map(projectCard).join("")}</div>` : `<div class="card"><h3>Пока нет проектов</h3><p class="muted" style="margin:6px 0 12px">Загрузи или запиши интервью: проект создастся вместе с первой записью.</p><button class="btn pri" data-act="newrec">Добавить запись</button></div>`;
@@ -440,7 +450,7 @@ function playerView() {
 
 function bindPlayer() {
   const inp = $(".answer-input");
-  if (inp && !inp.disabled) { setTimeout(() => inp.focus(), 30); inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); act(P.mode === "practice" ? "check" : "next"); } }); }
+  if (inp && !inp.disabled) { setTimeout(() => inp.focus(), 30); inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (!e.repeat) act(P.mode === "practice" ? "check" : "next"); } }); }
 }
 
 function currentVal() {
@@ -498,9 +508,234 @@ async function finishTest() {
   } catch (e) { toast(e.message); }
 }
 
+/* ---------- словарь ---------- */
+let V = null, C = null, vtab = "learning";
+const openW = new Set();
+const vitems = () => D?.vocab?.items || [];
+const vst = id => D.vocab.state.words[id] || { status: "new", seen: 0, correct: 0, wrong: 0, streak: 0 };
+const VSTAT = { new: "новое", known: "знаю", learning: "учу", learned: "выучено" };
+const PRAISE = ["Молодец!", "Отлично!", "Верно, так держать!", "Супер!"];
+const shuffle = a => { const r = a.slice(); for (let i = r.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [r[i], r[j]] = [r[j], r[i]]; } return r; };
+const normRu = s => String(s).toLowerCase().replace(/ё/g, "е").replace(/[.,;:!?()"«»'’\-—]/g, " ").replace(/\s+/g, " ").trim();
+const isRuOk = (w, val) => { const n = normRu(val); return !!n && w.accepted.some(a => normRu(a) === n); };
+
+let voiceChoice = "auto:US";
+try { voiceChoice = localStorage.getItem("voice") || "auto:" + (localStorage.getItem("accent") || "US"); } catch { /* без хранилища */ }
+let voiceList = [];
+const loadVoices = () => {
+  if (!("speechSynthesis" in window)) return;
+  voiceList = speechSynthesis.getVoices();
+  if (D && view === "vocab" && !P && !V && !C) render(true);
+};
+loadVoices();
+if ("speechSynthesis" in window) speechSynthesis.addEventListener("voiceschanged", loadVoices);
+const VOICE_PREF = {
+  "en-US": ["Samantha", "Саманта", "Ava", "Ава", "Allison", "Эллисон", "Google US English", "Aaron", "Аарон", "Nicky", "Alex", "Алекс", "Tom", "Том"],
+  "en-GB": ["Daniel", "Дэниэл", "Serena", "Серена", "Kate", "Кейт", "Oliver", "Оливер", "Stephanie", "Google UK English Female", "Google UK English Male"]
+};
+// шуточные и «звуковые» голоса macOS (названия бывают на русском) исключаем
+const VOICE_JUNK = ["Eddy", "Flo", "Grandma", "Grandpa", "Reed", "Rocko", "Sandy", "Shelley", "Albert", "Альберт", "Bahh", "Бах", "Bells", "Колокольчик", "Boing", "Воббл",
+  "Bubbles", "Пузырьки", "Cellos", "Виолончель", "Jester", "Шутник", "Junior", "Джуниор", "Kathy", "Кэти", "Organ", "Орган", "Ralph", "Ральф", "Superstar", "Суперзвезда",
+  "Trinoids", "Триноид", "Whisper", "Шепот", "Zarvox", "Зарвокс", "Fred", "Фред", "Good News", "Хорошие новости", "Bad News", "Плохие новости", "Hysterical", "Pipe", "Прыг-скок", "Wobble"];
+function pickVoice(lang) {
+  const norm = v => v.lang.replace("_", "-");
+  const byLang = voiceList.filter(v => norm(v) === lang && !VOICE_JUNK.some(j => v.name.includes(j)));
+  const best = (VOICE_PREF[lang] || []).map(p => byLang.find(v => v.name.includes(p))).find(Boolean);
+  return best || byLang[0] || voiceList.find(v => v.lang.startsWith("en") && !VOICE_JUNK.some(j => v.name.includes(j)));
+}
+function speak(text) {
+  if (!("speechSynthesis" in window)) { toast("Браузер не умеет озвучивать текст."); return; }
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.9;
+  let v = null;
+  if (voiceChoice.startsWith("voice:")) {
+    const [name, lang] = voiceChoice.slice(6).split("|");
+    v = voiceList.find(x => x.name === name && x.lang === lang) || null;
+  }
+  if (v) { u.voice = v; u.lang = v.lang; }
+  else {
+    const lang = voiceChoice === "auto:UK" ? "en-GB" : "en-US";
+    u.lang = lang;
+    const a = pickVoice(lang);
+    if (a) u.voice = a;
+  }
+  speechSynthesis.speak(u);
+}
+function voiceSelect() {
+  const en = voiceList.filter(v => v.lang.toLowerCase().startsWith("en"));
+  const junk = v => VOICE_JUNK.some(j => v.name.includes(j));
+  const opt = v => { const val = "voice:" + v.name + "|" + v.lang; return `<option value="${esc(val)}" ${voiceChoice === val ? "selected" : ""}>${esc(v.name.split(" (")[0])} · ${esc(v.lang)}</option>`; };
+  const good = en.filter(v => !junk(v)), fun = en.filter(junk);
+  return `<select id="voice" aria-label="Голос озвучки"><option value="auto:US" ${voiceChoice === "auto:US" ? "selected" : ""}>Авто · US</option><option value="auto:UK" ${voiceChoice === "auto:UK" ? "selected" : ""}>Авто · UK</option>
+    ${good.length ? `<optgroup label="Голоса устройства">${good.map(opt).join("")}</optgroup>` : ""}${fun.length ? `<optgroup label="Шуточные голоса">${fun.map(opt).join("")}</optgroup>` : ""}</select>`;
+}
+const spk = t => `<button class="spk" data-act="speak" data-w="${esc(t)}" aria-label="Прослушать: ${esc(t)}" title="Прослушать">🔊</button>`;
+
+function wordRow(w) {
+  const s = vst(w.id), open = openW.has(w.id);
+  const src = w.source ? `<p class="small muted">Из интервью: «${esc(w.source.quote)}»</p>` : "";
+  const details = !open ? "" : `<div class="stack" style="margin-top:10px;border-top:2px solid var(--line);padding-top:10px">
+    ${w.example ? `<div class="row"><div class="grow"><p>${esc(w.example)}</p><p class="small muted">${esc(w.example_ru)}</p></div>${spk(w.example)}</div>` : ""}
+    ${w.note ? `<p class="small">${esc(w.note)}</p>` : ""}${src}
+    ${s.status === "learning" ? `<p class="small muted">Подряд верно: ${s.streak} из 3 (после трёх слово считается выученным).</p>` : ""}
+    <div class="btns">${s.status === "learning" ? `<button class="btn small pri" data-act="wstatus" data-id="${esc(w.id)}" data-s="learned">Выучил</button>` : `<button class="btn small" data-act="wstatus" data-id="${esc(w.id)}" data-s="learning">Добавить в изучение</button>`}</div></div>`;
+  const cls = s.status === "learning" ? "warn" : s.status === "new" ? "" : "ok";
+  return `<div class="card word"><div class="row"><div class="grow" data-act="wtoggle" data-id="${esc(w.id)}" style="cursor:pointer"><div class="q">${esc(w.en)}</div><div class="small muted">${esc(w.ru)}</div></div>
+    <span class="badge ${cls}">${VSTAT[s.status]}</span>${spk(w.en)}</div>${details}</div>`;
+}
+
+function vocabView() {
+  const items = vitems();
+  if (!items.length) return `<div style="margin-top:6px"><h2>Словарь</h2></div><div class="card" style="margin-top:12px"><h3>Слов пока нет</h3><p class="muted" style="margin-top:6px">Слова появятся после разбора записи: Claude отберёт слова и выражения из твоих интервью.</p></div>`;
+  const by = s => items.filter(w => vst(w.id).status === s);
+  const nL = by("learning").length, nD = by("learned").length + by("known").length, nN = by("new").length;
+  const list = vtab === "learning" ? by("learning") : vtab === "learned" ? [...by("learned"), ...by("known")] : items;
+  const seg = (v, l) => `<button class="${vtab === v ? "on" : ""}" data-act="vtab" data-v="${v}">${l}</button>`;
+  return `<div class="row between" style="margin-top:6px"><div><h2>Словарь</h2><p class="small muted">Слова и выражения из твоих интервью</p></div>
+      <div class="row">${voiceSelect()}</div></div>
+    <div class="grid3" style="margin-top:12px"><div class="metric"><div class="small muted">На изучении</div><b>${nL}</b></div><div class="metric"><div class="small muted">Выучено</div><b>${nD}</b></div><div class="metric"><div class="small muted">Новых</div><b>${nN}</b></div></div>
+    <div class="btns" style="margin-top:12px"><button class="btn pri" data-act="vtest" data-m="new">Тест на слова</button>
+      <button class="btn acc" data-act="vcards" ${nL ? "" : "disabled"}>Учить карточки${nL ? ` (${nL})` : ""}</button>
+      <button class="btn" data-act="vtest" data-m="review" ${nL ? "" : "disabled"}>Повторить словарь</button></div>
+    <p class="small muted" style="margin-top:8px">Произношение: синтезированный английский голос вашего устройства (это не запись живого диктора). Голос можно выбрать справа вверху${(() => { const n = voiceList.filter(v => v.lang.toLowerCase().startsWith("en") && !VOICE_JUNK.some(j => v.name.includes(j))).length; return n <= 2 ? `. Сейчас доступно обычных английских голосов: ${n}. Больше голосов можно скачать в настройках системы (macOS: Системные настройки → Универсальный доступ → Устный контент → Системный голос → Управлять голосами), после этого обнови страницу` : ""; })()}.</p>
+    <div class="seg" style="margin-top:14px">${seg("learning", `На изучении (${nL})`)}${seg("learned", `Выучено (${nD})`)}${seg("all", `Все (${items.length})`)}</div>
+    <div class="stack" style="margin-top:12px">${list.length ? list.map(wordRow).join("") : `<div class="card"><p class="muted">${vtab === "learning" ? "Здесь появятся слова, на которых ты ошибся в тесте. Пока пусто: пройди тест на слова." : "Пока пусто."}</p></div>`}</div>`;
+}
+
+/* --- тест на слова --- */
+function startVTest(mode) {
+  const items = vitems();
+  if (!items.length) { toast("Слов пока нет."); return; }
+  const st = w => vst(w.id).status, last = w => vst(w.id).last || "";
+  const learning = items.filter(w => st(w) === "learning").sort((a, b) => last(a).localeCompare(last(b)));
+  const fresh = shuffle(items.filter(w => st(w) === "new")), done = shuffle(items.filter(w => ["known", "learned"].includes(st(w))));
+  let pick;
+  if (mode === "review") pick = learning.slice(0, 10);
+  else {
+    pick = learning.slice(0, 4);
+    for (const w of fresh) { if (pick.length >= 10) break; pick.push(w); }
+    for (const w of done) { if (pick.length >= 10) break; pick.push(w); }
+  }
+  if (!pick.length) { toast(mode === "review" ? "В словаре пока нет слов на изучении." : "Слов для теста нет."); return; }
+  V = { items: shuffle(pick), i: 0, res: [], checked: false, phase: "run", mode, val: "" };
+  render();
+}
+
+function vhead(n, done, label) {
+  return `<div class="phead"><button class="x-btn" data-act="vclose" aria-label="Закрыть">✕</button><div class="bar"><i style="width:${done / n * 100}%"></i></div><span class="small muted">${label}</span></div>`;
+}
+
+function vplayerView() {
+  const n = V.items.length;
+  if (V.phase === "done") return `<div class="player">${vhead(n, n, `${n}/${n}`)}${vresult()}</div>`;
+  const w = V.items[V.i], r = V.checked ? V.res[V.i] : null;
+  const cls = r ? (r.ok ? " right" : " wrong") : "";
+  let dock;
+  if (r) {
+    const others = w.accepted.filter(a => normRu(a) !== normRu(w.ru)).slice(0, 3);
+    dock = `<div class="dock ${r.ok ? "right" : "wrong"}"><div class="dock-in"><h3>${r.ok ? PRAISE[Math.floor(Math.random() * PRAISE.length)] + " 🎉" : "Пока нет. Перевод:"}</h3>
+      <p><b>${esc(w.ru)}</b>${others.length ? `<span class="small"> · также: ${esc(others.join(", "))}</span>` : ""}${w.example ? `<br><span class="small">${esc(w.example)} — ${esc(w.example_ru)}</span>` : ""}${r.ok ? "" : `<br><span class="small">Слово добавлено в твой словарь.</span>`}</p>
+      <div class="btns">${!r.ok ? `<button class="btn small" data-act="vclaim">Мой вариант тоже верный</button>` : ""}<button class="btn ${r.ok ? "pri" : ""} grow" data-act="vnext">${V.i + 1 < n ? "Дальше" : "Завершить"}</button></div></div></div>`;
+  } else dock = `<div class="dock"><div class="dock-in"><button class="btn pri wide" data-act="vcheck">Проверить</button></div></div>`;
+  return `<div class="player">${vhead(n, V.i, `${V.i + 1}/${n}`)}
+    <div class="prompt row" style="justify-content:space-between"><span>${esc(w.en)}</span>${spk(w.en)}</div>
+    <p class="sub">${w.kind === "phrase" ? "Выражение" : "Слово"}: введи перевод на русский</p>
+    <input class="answer-input${cls}" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Перевод" value="${esc(V.val || "")}" ${r ? "disabled" : ""}>
+    <div class="errmsg" id="verr"></div>${dock}</div>`;
+}
+
+function bindV() {
+  const inp = $(".answer-input");
+  if (inp && !inp.disabled) { setTimeout(() => inp.focus(), 30); inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (!e.repeat) act("vcheck"); } }); }
+}
+
+function vcheck() {
+  const w = V.items[V.i], val = ($(".answer-input")?.value || "").trim();
+  if (!val) { $("#verr").textContent = "Введи перевод"; return; }
+  V.val = val; V.res[V.i] = { val, ok: isRuOk(w, val), claimed: false }; V.checked = true; render();
+}
+
+async function postWord(w, ok, claimed, answer) {
+  try {
+    const r = await api("/api/vocab/answer", { id: w.id, ok, claimed, answer });
+    D.vocab.state.words[w.id] = r.word; D.game = r.game;
+    if (r.learned) toast(`Выучено: ${w.en}`);
+  } catch (e) { toast(e.message); }
+}
+
+async function vnext() {
+  const w = V.items[V.i], r = V.res[V.i];
+  await postWord(w, r.ok, r.claimed, r.val);
+  V.i += 1; V.checked = false; V.val = "";
+  if (V.i >= V.items.length) {
+    V.i = V.items.length - 1; V.phase = "done";
+    const ok = V.res.filter(x => x.ok).length;
+    try { const f = await api("/api/vocab/finish", { correct: ok }); D.game = f.game; V.bonus = f.xp_gained; } catch { /* не критично */ }
+  }
+  render();
+}
+
+function vresult() {
+  const n = V.items.length, ok = V.res.filter(x => x.ok).length, bad = V.items.filter((w, i) => !V.res[i].ok);
+  const xp = ok * 2 + (V.bonus || 0);
+  return `<div class="stack center" style="padding-top:20px"><div class="big">${ok} из ${n}</div>
+    <p class="muted">${bad.length ? `Неизвестные слова (${bad.length}) добавлены в твой словарь.` : "Все слова на месте. Молодец!"}</p><span class="chip" style="justify-content:center">+${xp} XP</span></div>
+    ${bad.length ? `<div class="sec">Добавлено в словарь</div><div class="card" style="padding:4px 16px">${bad.map(w => `<div class="result-row row"><div class="grow"><div class="q">${esc(w.en)}</div><div class="small muted">${esc(w.ru)}</div></div>${spk(w.en)}</div>`).join("")}</div>` : ""}
+    <div class="stack" style="margin-top:16px;padding-bottom:20px"><button class="btn pri wide" data-act="vopen">Открыть словарь</button><button class="btn wide" data-act="vtest" data-m="${V.mode}">Ещё тест</button></div>`;
+}
+
+/* --- карточки --- */
+function startCards() {
+  const last = w => vst(w.id).last || "";
+  const items = vitems().filter(w => vst(w.id).status === "learning").sort((a, b) => last(a).localeCompare(last(b)));
+  if (!items.length) { toast("В словаре нет слов на изучении."); return; }
+  C = { items, i: 0, flip: false, ok: 0, again: 0, done: false }; render();
+}
+
+function cardsView() {
+  const n = C.items.length;
+  const head = `<div class="phead"><button class="x-btn" data-act="vclose" aria-label="Закрыть">✕</button><div class="bar"><i style="width:${(C.done ? n : C.i) / n * 100}%"></i></div><span class="small muted">${Math.min(C.i + 1, n)}/${n}</span></div>`;
+  if (C.done) return `<div class="player">${head}<div class="stack center" style="padding-top:20px"><div class="big">${C.ok} знаю</div><p class="muted">Ещё раз: ${C.again}. Слова, которые ты знаешь три раза подряд, переходят в «Выучено».</p>
+    <div class="stack" style="margin-top:16px"><button class="btn pri wide" data-act="vopen">К словарю</button>${C.again ? `<button class="btn wide" data-act="vcards">Повторить ещё раз</button>` : ""}</div></div></div>`;
+  const w = C.items[C.i];
+  const back = C.flip ? `<div class="stack" style="margin-top:16px"><div class="big" style="font-size:30px">${esc(w.ru)}</div>
+    ${w.example ? `<div class="row" style="justify-content:center"><p>${esc(w.example)}</p>${spk(w.example)}</div><p class="small muted">${esc(w.example_ru)}</p>` : ""}${w.note ? `<p class="small">${esc(w.note)}</p>` : ""}</div>` : "";
+  const dock = C.flip
+    ? `<div class="dock"><div class="dock-in btns"><button class="btn grow" data-act="cagain">Ещё раз</button><button class="btn pri grow" data-act="cknow">Знаю</button></div></div>`
+    : `<div class="dock"><div class="dock-in"><button class="btn pri wide" data-act="cflip">Показать перевод</button></div></div>`;
+  return `<div class="player">${head}<div class="card center flipcard"><div class="row" style="justify-content:center"><div class="big" style="font-size:34px">${esc(w.en)}</div>${spk(w.en)}</div>
+    <p class="small muted">${w.kind === "phrase" ? "Выражение" : "Слово"} · вспомни перевод</p>${back}</div>${dock}</div>`;
+}
+
+async function cardAnswer(ok) {
+  const w = C.items[C.i];
+  await postWord(w, ok, false, "");
+  if (ok) C.ok += 1; else C.again += 1;
+  C.i += 1; C.flip = false;
+  if (C.i >= C.items.length) { C.i = C.items.length - 1; C.done = true; }
+  render();
+}
+
+function closeVocab() { V = null; C = null; view = "vocab"; load(); }
+
 /* ---------- действия ---------- */
 async function act(a, el) {
   if (a === "tab") { view = el.dataset.v; render(); }
+  else if (a === "speak") speak(el.dataset.w);
+  else if (a === "vtab") { vtab = el.dataset.v; render(true); }
+  else if (a === "wtoggle") { const id = el.dataset.id; if (openW.has(id)) openW.delete(id); else openW.add(id); render(true); }
+  else if (a === "wstatus") { try { const r = await api("/api/vocab/status", { id: el.dataset.id, status: el.dataset.s }); D.vocab.state.words[el.dataset.id] = r.word; render(true); } catch (e) { toast(e.message); } }
+  else if (a === "vtest") startVTest(el.dataset.m || "new");
+  else if (a === "vcards") startCards();
+  else if (a === "vcheck") vcheck();
+  else if (a === "vclaim") { V.res[V.i].ok = true; V.res[V.i].claimed = true; render(); }
+  else if (a === "vnext") vnext();
+  else if (a === "cflip") { C.flip = true; render(); }
+  else if (a === "cknow") cardAnswer(true);
+  else if (a === "cagain") cardAnswer(false);
+  else if (a === "vclose") closeVocab();
+  else if (a === "vopen") closeVocab();
   else if (a === "newrec") { newUpload(el?.dataset?.p || null); view = "upload"; render(); }
   else if (a === "openproject") { curProject = el.dataset.p; view = "project"; render(); }
   else if (a === "openinterview") { curSession = el.dataset.s; view = "interview"; render(); }
@@ -538,8 +773,14 @@ document.addEventListener("click", e => {
   if (el && !el.disabled && el.tagName !== "SELECT") act(el.dataset.act, el);
 });
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape" && P && P.phase !== "done") closePlayer();
+  if (e.key === "Enter" && e.repeat) return;
+  if (e.key === "Escape" && (V || C)) closeVocab();
+  else if (e.key === "Enter" && V && V.phase === "run" && V.checked && document.activeElement?.tagName !== "BUTTON") act("vnext");
+  else if (e.key === "Escape" && P && P.phase !== "done") closePlayer();
   else if (e.key === "Enter" && P && P.phase === "run" && P.mode === "practice" && P.checked && document.activeElement?.tagName !== "BUTTON") act("next");
+});
+document.addEventListener("change", e => {
+  if (e.target.id === "voice") { voiceChoice = e.target.value; try { localStorage.setItem("voice", voiceChoice); } catch { /* ок */ } speak("Hello, this is how I sound."); }
 });
 window.addEventListener("beforeunload", e => { if (rec || U?.uploading) { e.preventDefault(); e.returnValue = ""; } });
 

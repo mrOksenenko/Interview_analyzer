@@ -6,6 +6,7 @@ const CATS = { tenses: "Времена", articles: "Артикли", preposition
 const STATUS = { open: "Новая", learning: "Учу", mastered: "Освоено", relapsed: "Вернулась" };
 const MODEL_HINT = { tiny: "очень быстро, но неточно", base: "быстро, средняя точность", small: "оптимально: быстро и точно", medium: "точнее, но заметно медленнее" };
 
+let tnat = "all";
 let D = null, view = "home", P = null, timer = null, curSession = null, curProject = null, poll = null;
 let U = null;           // состояние формы загрузки
 let rec = null;         // идущая запись с микрофона
@@ -113,7 +114,7 @@ function topicCard(k, showProject) {
   const next = t.status === "mastered" ? "освоено" : t.next_review ? (due ? "тест сегодня" : `тест ${t.next_review}`) : "тест после урока";
   return `<div class="card topic"><div class="grow stack" style="--g:6px">
     <div class="q">${esc(t.name)}</div>
-    <div class="row wrap">${showProject ? `<span class="badge">${esc(projOf(t.project).name)}</span>` : ""}<span class="badge ${t.type === "grammar" ? "acc" : "warn"}">${t.type === "grammar" ? "Язык" : "Знание"}</span><span class="badge">${STATUS[t.status]}</span>${dots}<span class="small muted">${next}${t.mastery != null ? ` · ${Math.round(t.mastery)}%` : ""}</span></div>
+    <div class="row wrap">${showProject ? `<span class="badge">${esc(projOf(t.project).name)}</span>` : ""}<span class="badge ${t.type === "grammar" ? "acc" : "warn"}">${t.type === "grammar" ? "Язык" : "Знание"}</span>${t.type === "grammar" ? `<span class="badge">${NAT[natOfCat(t.category)]}</span>` : ""}<span class="badge">${STATUS[t.status]}</span>${dots}<span class="small muted">${next}${t.mastery != null ? ` · ${Math.round(t.mastery)}%` : ""}</span></div>
     ${hasLesson ? `<div class="btns"><button class="btn pri small" data-act="lesson" data-k="${esc(k)}">Урок</button>${due ? `<button class="btn acc small" data-act="test" data-k="${esc(k)}">Тест</button>` : ""}</div>` : `<div class="small muted">Урока пока нет. Напиши Claude: «составь уроки для проекта ${esc(projOf(t.project).name)}».</div>`}
   </div></div>`;
 }
@@ -199,6 +200,10 @@ function projectView() {
     const first = S[0].overall.total, last = S[S.length - 1].overall.total, d = Math.round((last - first) * 10) / 10;
     h += `<div class="card row" style="margin-top:12px"><div class="grow"><div class="q">Динамика итога</div><p class="small muted">${first} → ${last} (${d >= 0 ? "+" : ""}${d}) за ${S.length} записи(ей)</p></div>${trendSvg(S.map(s => s.overall.total))}</div>`;
   }
+  if (S.length) {
+    const row = n => `<div class="row between"><span>${NAT[n]}</span><b>${S.map(s => (s.errors || []).filter(e => natOfCat(e.category) === n).length).join(" → ")}</b></div>`;
+    h += `<div class="card stack" style="margin-top:12px"><div class="q">Ошибки по типам</div>${NAT_ORDER.map(row).join("")}<p class="small muted">Числа по записям, слева направо. Записи разной длины, сравнивай осторожно.</p></div>`;
+  }
   h += `<div class="sec">Записи</div><div class="stack">${order.length ? order.map(sid => {
     const s = S.find(x => x.session_id === sid), m = pend.find(x => x.id === sid);
     if (s) return `<div class="card topic" data-act="openinterview" data-s="${esc(sid)}" style="cursor:pointer">${ring(s.overall.total, 64, "")}<div class="grow stack" style="--g:4px">
@@ -227,11 +232,12 @@ function interview() {
     <div class="row wrap">${pill("Ответ", a.score_content)}${pill("Английский", a.score_english)}<span class="badge ${a.cause === "none" ? "ok" : "warn"}">${CAUSE[a.cause] || esc(a.cause)}</span>${a.smalltalk ? `<span class="badge">small talk</span>` : ""}</div>
     ${a.answer_summary ? `<p class="small">${esc(a.answer_summary)}</p>` : ""}
     ${a.evidence ? `<p class="ev">${esc(a.evidence)}</p>` : ""}</div>`).join("")}</div>`;
-  const errs = s.errors || [], groups = {};
-  errs.forEach(e => (groups[e.category] = groups[e.category] || []).push(e));
-  h += `<div class="sec">Ошибки (${errs.length})</div><div class="stack">${Object.entries(groups).sort((a, b) => b[1].length - a[1].length).map(([c, list]) => `<div class="card">
-    <div class="row between"><h3>${CATS[c] || esc(c)}</h3><span class="badge">${list.length}</span></div>
-    ${list.map(e => `<div class="err"><div><span class="x">${esc(e.quote)}</span></div><div><span class="v">${esc(e.correction)}</span> <span class="small muted">${esc(e.timestamp || "")}${e.confidence && e.confidence !== "high" ? " · проверить по аудио" : ""}</span></div><div class="r">${esc(e.rule || "")}</div></div>`).join("")}</div>`).join("")}</div>`;
+  const errs = s.errors || [], groups = { tense: [], article: [], prep: [], other: [] };
+  errs.forEach(e => groups[natOfCat(e.category)].push(e));
+  h += `<div class="sec">Ошибки (${errs.length})</div><div class="grid4">${NAT_ORDER.map(n => `<div class="metric"><div class="small muted">${NAT[n]}</div><b>${groups[n].length}</b></div>`).join("")}</div>
+    <div class="stack" style="margin-top:12px">${NAT_ORDER.filter(n => groups[n].length).map(n => `<div class="card">
+    <div class="row between"><h3>${NAT[n]}</h3><span class="badge">${groups[n].length}</span></div>
+    ${groups[n].map(e => `<div class="err">${n === "other" ? `<div><span class="badge">${CATS[e.category] || esc(e.category)}</span></div>` : ""}<div><span class="x">${esc(e.quote)}</span></div><div><span class="v">${esc(e.correction)}</span> <span class="small muted">${esc(e.timestamp || "")}${e.confidence && e.confidence !== "high" ? " · проверить по аудио" : ""}</span></div><div class="r">${esc(e.rule || "")}</div></div>`).join("")}</div>`).join("")}</div>`;
   if ((s.strengths || []).length) h += `<div class="sec">Сильные стороны</div><div class="card stack">${s.strengths.map(x => `<p>✅ ${esc(x)}</p>`).join("")}</div>`;
   return h;
 }
@@ -240,10 +246,12 @@ function interview() {
 function topics() {
   const order = { relapsed: 0, open: 1, learning: 2, mastered: 3 };
   let h = `<div style="margin-top:6px"><h2>Темы для проработки</h2><p class="small muted">Тест открывается по графику: на следующий день после урока, потом через 3, 7 и 14 дней. Зачёт — ${D.pass_score}%.</p></div>`;
+  const chip = (v, l) => `<button class="${tnat === v ? "on" : ""}" data-act="tnat" data-v="${v}">${l}</button>`;
+  h += `<div class="seg" style="margin-top:12px">${chip("all", "Все")}${NAT_ORDER.map(n => chip(n, NAT[n])).join("")}</div>`;
   const ps = Object.keys(projects());
   if (!ps.length) return h + `<div class="card" style="margin-top:12px"><p class="muted">Тем пока нет.</p></div>`;
   ps.forEach(pid => {
-    const ks = Object.keys(D.progress.topics).filter(k => D.progress.topics[k].project === pid).sort((a, b) => order[D.progress.topics[a].status] - order[D.progress.topics[b].status]);
+    const ks = Object.keys(D.progress.topics).filter(k => D.progress.topics[k].project === pid && (tnat === "all" || natOfCat(D.progress.topics[k].category) === tnat)).sort((a, b) => order[D.progress.topics[a].status] - order[D.progress.topics[b].status]);
     h += `<div class="sec">${esc(projOf(pid).name)}</div><div class="stack">${ks.length ? ks.map(k => topicCard(k, false)).join("") : `<div class="card"><p class="muted">План появится после разбора записи.</p></div>`}</div>`;
   });
   return h;
@@ -399,6 +407,51 @@ function isCorrect(it, val) {
 }
 const expected = it => it.type === "choice" ? it.answer : it.accepted[0];
 
+/* ---------- природа ошибок: времена, артикли, предлоги, прочее ---------- */
+const NAT = { tense: "Времена", article: "Артикли", prep: "Предлоги", other: "Прочее" };
+const NAT_ORDER = ["tense", "article", "prep", "other"];
+const natOfCat = c => c === "tenses" ? "tense" : c === "articles" ? "article" : c === "prepositions" ? "prep" : "other";
+const natBadges = list => (list && list.length ? list : ["other"]).map(n => `<span class="badge ${n === "other" ? "" : "acc"}">${NAT[n]}</span>`).join(" ");
+const ART = new Set(["a", "an", "the"]);
+const PREP = new Set(["in", "on", "at", "to", "for", "of", "by", "with", "from", "about", "toward", "towards", "into", "onto", "over", "under", "since", "during", "between", "through", "around", "after", "before", "as", "like", "until", "across", "near"]);
+const AUX = new Set(["am", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "can", "could", "should", "may", "might", "must", "gonna", "going"]);
+const IRREG = [["go", "went", "gone"], ["get", "got"], ["lose", "lost"], ["take", "took", "taken"], ["make", "made"], ["see", "saw", "seen"], ["know", "knew", "known"], ["shoot", "shot"], ["choose", "chose", "chosen"], ["break", "broke", "broken"], ["buy", "bought"], ["write", "wrote", "written"], ["begin", "began", "begun"], ["bring", "brought"], ["find", "found"], ["think", "thought"], ["come", "came"], ["give", "gave", "given"], ["run", "ran"], ["set", "set"], ["put", "put"], ["use", "used"]];
+const tokens = (s, gap) => normAns(s, gap).split(" ").filter(Boolean);
+function bagDiff(a, b) {
+  const m = new Map();
+  b.forEach(x => m.set(x, (m.get(x) || 0) + 1));
+  const out = [];
+  a.forEach(x => { if ((m.get(x) || 0) > 0) m.set(x, m.get(x) - 1); else out.push(x); });
+  return out;
+}
+function classifyTok(x, other) {
+  if (ART.has(x)) return "article";
+  if (PREP.has(x)) return "prep";
+  if (AUX.has(x) || /(ing|ed)$/.test(x) || IRREG.some(g => g.includes(x))) return "tense";
+  for (const o of other) {
+    if (o !== x && o.length >= 3 && x.length >= 3 && o.slice(0, 3) === x.slice(0, 3) && !/(ly|y)$/.test(o) && !/(ly|y)$/.test(x)) return "tense";
+  }
+  return "other";
+}
+/* Что именно отличается от ближайшего варианта ключа: артикль, предлог, время/форма глагола или прочее. */
+function errNature(it, val) {
+  const topicNat = natOfCat(D.progress.topics[P?.key]?.category);
+  if (it.type === "choice") return [topicNat];
+  const gap = it.type === "gap", u = tokens(val, gap);
+  let best = null, bd = Infinity;
+  for (const a of it.accepted) {
+    const tk = tokens(a, gap), d = bagDiff(u, tk).length + bagDiff(tk, u).length;
+    if (d < bd) { bd = d; best = tk; }
+  }
+  if (!best) return [topicNat];
+  const extra = bagDiff(u, best), miss = bagDiff(best, u);
+  if (!extra.length && !miss.length) return ["other"];
+  const set = new Set();
+  extra.forEach(x => set.add(classifyTok(x, miss)));
+  miss.forEach(x => set.add(classifyTok(x, extra)));
+  return NAT_ORDER.filter(n => set.has(n));
+}
+
 /* ---------- плеер: урок и тест ---------- */
 async function openLesson(key, mode) {
   try {
@@ -443,7 +496,7 @@ function playerView() {
   }
   body += `<div class="errmsg" id="err"></div>`;
   let dock;
-  if (r && practice) dock = `<div class="dock ${r.ok ? "right" : "wrong"}"><div class="dock-in"><h3>${r.ok ? "Верно!" : "Почти. Правильно:"}</h3><p>${r.ok ? "" : `<b>${esc(expected(it))}</b><br>`}${esc(it.explain || "")}</p><button class="btn ${r.ok ? "pri" : ""} wide" data-act="next">${P.i + 1 < P.items.length ? "Дальше" : "Завершить"}</button></div></div>`;
+  if (r && practice) dock = `<div class="dock ${r.ok ? "right" : "wrong"}"><div class="dock-in"><h3>${r.ok ? "Верно!" : "Почти."}</h3><p>${r.ok ? "" : `Твой ответ: <span class="mine">${esc(r.val)}</span><br>Правильно: <b>${esc(expected(it))}</b><br>Ошибка в: ${natBadges(r.nature)}<br>`}${esc(it.explain || "")}</p><button class="btn ${r.ok ? "pri" : ""} wide" data-act="next">${P.i + 1 < P.items.length ? "Дальше" : "Завершить"}</button></div></div>`;
   else dock = `<div class="dock"><div class="dock-in"><button class="btn pri wide" data-act="${practice ? "check" : "next"}">${practice ? "Проверить" : (P.i + 1 < P.items.length ? "Дальше" : "Завершить тест")}</button></div></div>`;
   return `<div class="player">${head}${body}${dock}</div>`;
 }
@@ -461,7 +514,9 @@ function currentVal() {
 function commit() {
   const it = P.items[P.i], val = currentVal();
   if (!val) { $("#err").textContent = it.type === "choice" ? "Выбери вариант" : "Введи ответ"; return false; }
-  P.res[P.i] = { val, ok: isCorrect(it, val) };
+  const ok = isCorrect(it, val);
+  P.sel = val;                                   // ответ остаётся в поле после проверки
+  P.res[P.i] = { val, ok, nature: ok ? null : errNature(it, val) };
   return true;
 }
 
@@ -469,8 +524,15 @@ function practiceResult() {
   const ok = P.res.filter(r => r.ok).length, n = P.items.length;
   const test = D.due.includes(P.key) && D.lessons[P.key];
   return `<div class="stack center" style="padding-top:24px"><div class="big">${ok} из ${n}</div><p class="muted">${ok === n ? "Без ошибок!" : "Ошибки — это материал для следующего захода."}</p>
-    <p class="chip" id="xpgain" style="justify-content:center">+${ok * 5 + 20} XP</p>
+    <p class="chip" id="xpgain" style="justify-content:center">+${ok * 5 + 20} XP</p>${natSummary()}
     <div class="stack" style="margin-top:16px">${test ? `<button class="btn pri wide" data-act="retest">Пройти тест</button>` : ""}<button class="btn wide" data-act="restart">Ещё раз</button><button class="btn wide" data-act="close">На главную</button></div></div>`;
+}
+
+function natSummary() {
+  const nat = { tense: 0, article: 0, prep: 0, other: 0 };
+  P.res.forEach(r => { if (!r.ok) (r.nature && r.nature.length ? r.nature : ["other"]).forEach(n => { nat[n] += 1; }); });
+  if (!Object.values(nat).some(Boolean)) return "";
+  return `<div class="sec">Ошибки по типам</div><div class="grid4">${NAT_ORDER.map(n => `<div class="metric"><div class="small muted">${NAT[n]}</div><b>${nat[n]}</b></div>`).join("")}</div>`;
 }
 
 function testResult() {
@@ -478,7 +540,7 @@ function testResult() {
   const rows = items.map((it, i) => {
     const r = P.res[i];
     return `<div class="result-row"><div class="row between"><div class="q grow">${i + 1}. ${esc(it.prompt)}</div><span class="badge ${r.ok ? "ok" : "bad"}">${r.ok ? "верно" : "ошибка"}</span></div>
-      ${r.ok ? "" : `<p class="small" style="margin-top:4px">Ты: <span style="color:var(--bad)">${esc(r.val)}</span><br>Правильно: <b>${esc(expected(it))}</b></p>`}
+      ${r.ok ? "" : `<p class="small" style="margin-top:4px">Ты: <span style="color:var(--bad)">${esc(r.val)}</span><br>Правильно: <b>${esc(expected(it))}</b></p><div class="row wrap" style="margin-top:4px"><span class="small muted">Ошибка в:</span> ${natBadges(r.nature)}</div>`}
       <p class="small muted">${esc(it.explain || "")}</p>
       ${!r.ok && it.type !== "choice" ? `<button class="btn small" style="margin-top:6px" data-act="review" data-i="${i}" ${r.sent ? "disabled" : ""}>${r.sent ? "Отправлено Claude" : "Мой вариант тоже верный"}</button>` : ""}</div>`;
   }).join("");
@@ -487,7 +549,7 @@ function testResult() {
     <h2>${R.passed ? "Зачёт!" : "Пока не зачёт"}</h2>
     <p class="muted">${R.passed ? `Стадия ${t.stage} из ${D.mastered_stage}. Следующая проверка: ${esc(t.next_review)}.` : `Нужно ${D.pass_score}%. Повтори урок и приходи завтра: ${esc(t.next_review)}.`}</p>
     <span class="chip" style="justify-content:center">+${R.xp_gained} XP</span></div>
-    <div class="sec">Разбор</div><div class="card" style="padding:4px 16px">${rows}</div>
+    ${natSummary()}<div class="sec">Разбор</div><div class="card" style="padding:4px 16px">${rows}</div>
     <p class="small muted" style="margin-top:10px">Балл посчитан по точному совпадению с ключом. Если твой вариант тоже верный, отправь его Claude: он проверит в чате.</p>
     <div class="stack" style="margin-top:14px;padding-bottom:20px"><button class="btn pri wide" data-act="close">На главную</button></div>`;
 }
@@ -723,6 +785,7 @@ function closeVocab() { V = null; C = null; view = "vocab"; load(); }
 async function act(a, el) {
   if (a === "tab") { view = el.dataset.v; render(); }
   else if (a === "speak") speak(el.dataset.w);
+  else if (a === "tnat") { tnat = el.dataset.v; render(true); }
   else if (a === "vtab") { vtab = el.dataset.v; render(true); }
   else if (a === "wtoggle") { const id = el.dataset.id; if (openW.has(id)) openW.delete(id); else openW.add(id); render(true); }
   else if (a === "wstatus") { try { const r = await api("/api/vocab/status", { id: el.dataset.id, status: el.dataset.s }); D.vocab.state.words[el.dataset.id] = r.word; render(true); } catch (e) { toast(e.message); } }

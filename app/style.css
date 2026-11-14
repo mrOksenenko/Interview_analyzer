@@ -127,3 +127,8 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
 .flipcard{margin-top:24px;padding:28px 16px}
 .dock-in.btns{display:flex;gap:10px}
 .btn.grow{flex:1}
+
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.mine{color:var(--bad);font-weight:700}
+.player{padding-bottom:230px}
+@media (max-width:480px){.grid4{grid-template-columns:repeat(2,1fr)}}

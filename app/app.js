@@ -87,12 +87,13 @@ function topbar() {
     <span class="chip" title="Опыт">Ур. ${g.level} <span class="xpbar"><i style="width:${g.xp_in_level / g.xp_per_level * 100}%"></i></span> ${g.xp} XP</span></header>`;
 }
 function tabbar() {
-  const on = v => ({ home: "home", projects: "projects", project: "projects", interview: "projects", topics: "topics", vocab: "vocab" }[view] === v ? "on" : "");
+  const on = v => ({ home: "home", projects: "projects", project: "projects", interview: "projects", topics: "topics", vocab: "vocab", vadd: "vocab", spelling: "spelling" }[view] === v ? "on" : "");
   return `<nav class="tabs"><button class="tab ${on("home")}" data-act="tab" data-v="home"><span>🏠</span>Главная</button>
     <button class="tab ${on("projects")}" data-act="tab" data-v="projects"><span>📁</span>Проекты</button>
     <button class="tab add ${view === "upload" || view === "status" ? "on" : ""}" data-act="newrec"><span>＋</span>Запись</button>
     <button class="tab ${on("topics")}" data-act="tab" data-v="topics"><span>🧩</span>Темы</button>
-    <button class="tab ${on("vocab")}" data-act="tab" data-v="vocab"><span>📖</span>Словарь</button></nav>`;
+    <button class="tab ${on("vocab")}" data-act="tab" data-v="vocab"><span>📖</span>Словарь</button>
+    <button class="tab ${on("spelling")}" data-act="tab" data-v="spelling" title="Правописание"><span>✏️</span>Письмо</button></nav>`;
 }
 
 function render(keepScroll) {
@@ -100,10 +101,12 @@ function render(keepScroll) {
   if (P) { app.innerHTML = playerView(); bindPlayer(); return; }
   if (V) { app.innerHTML = vplayerView(); bindV(); return; }
   if (C) { app.innerHTML = cardsView(); return; }
+  if (SD) { app.innerHTML = sdView(); bindSD(); return; }
   const y = window.scrollY;
-  const v = { home, projects: projectsView, project: projectView, interview, topics, upload: uploadView, status: statusView, vocab: vocabView }[view];
+  const v = { home, projects: projectsView, project: projectView, interview, topics, upload: uploadView, status: statusView, vocab: vocabView, vadd: vaddView, spelling: spellingView }[view];
   app.innerHTML = topbar() + `<main>${v()}</main>` + tabbar();
   if (view === "upload") bindUpload();
+  if (view === "vadd") bindVadd();
   window.scrollTo(0, keepScroll ? y : 0);
 }
 
@@ -433,22 +436,75 @@ function classifyTok(x, other) {
   }
   return "other";
 }
-/* Что именно отличается от ближайшего варианта ключа: артикль, предлог, время/форма глагола или прочее. */
+
+/* ---------- правописание: опечатка в слове ≠ ошибка по теме ----------
+   Слово считается опечаткой, если оно отличается от нужного одной-двумя буквами (вставка, пропуск, замена, перестановка),
+   начинается с той же буквы и не является другой формой слова (артикль, предлог, вспомогательный глагол, время, путаница вроде lose/loose). */
+const FUNC = new Set([...ART, ...PREP, ...AUX, "i", "he", "she", "it", "we", "they", "you", "me", "him", "her", "us", "them", "my", "his", "its", "our", "their", "your", "this", "that", "and", "or", "but", "so", "not", "no", "yes", "if", "than", "then", "there", "these", "those", "what", "when", "where", "who", "why", "how"]);
+const CONFUSE = [["lose", "loose"], ["choose", "chose"], ["then", "than"], ["their", "there"], ["quiet", "quite"], ["affect", "effect"], ["form", "from"], ["where", "were"], ["whole", "hole"], ["lead", "led"], ["accept", "except"], ["advice", "advise"], ["breath", "breathe"], ["through", "though"], ["thorough", "through"], ["weather", "whether"], ["later", "latter"], ["angle", "angel"], ["lens", "lends"], ["scene", "seen"], ["shoot", "shot"], ["light", "right"], ["lights", "rights"]];
+function editDist(a, b) {                      // расстояние Дамерау — Левенштейна (с перестановкой соседних букв)
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+  }
+  return d[a.length][b.length];
+}
+function isTypo(x, y, lang) {
+  if (x === y) return false;
+  const rx = lang === "ru" ? /^[а-яё-]+$/ : /^[a-z'-]+$/;
+  if (!rx.test(x) || !rx.test(y) || x.length < 4 || y.length < 4 || x[0] !== y[0]) return false;
+  if (lang !== "ru") {
+    if (FUNC.has(x) || FUNC.has(y)) return false;
+    if (IRREG.some(g => g.includes(x) && g.includes(y)) || CONFUSE.some(g => g.includes(x) && g.includes(y))) return false;
+  }
+  if (editDist(x, y) > (Math.max(x.length, y.length) >= 9 ? 2 : 1)) return false;
+  const s = x.length < y.length ? x : y, l = x.length < y.length ? y : x;
+  if (l.startsWith(s)) return lang !== "ru" && l.length - s.length === 1 && !"sd".includes(l.slice(-1));   // work/works — грамматика, а camer/camera — опечатка
+  return true;
+}
+/* Сравнение с ближайшим вариантом ключа: опечатки отдельно, остальные различия отдельно. */
+function analyzeTokens(u, variants, lang) {
+  let best = null;
+  for (const tk of variants) {
+    let extra = bagDiff(u, tk), miss = bagDiff(tk, u);
+    const pairs = [];
+    extra = extra.filter(e => {
+      const j = miss.findIndex(m => isTypo(e, m, lang));
+      if (j < 0) return true;
+      pairs.push({ typed: e, right: miss[j] });
+      miss = miss.filter((_, k) => k !== j);
+      return false;
+    });
+    const fixed = u.map(x => { const p = pairs.find(q => q.typed === x); return p ? p.right : x; });
+    const score = extra.length + miss.length + (fixed.join(" ") === tk.join(" ") ? 0 : 0.5);
+    if (!best || score < best.score) best = { score, extra, miss, pairs, orderOk: fixed.join(" ") === tk.join(" ") };
+  }
+  return best;
+}
+/* Итог по текстовому ответу: ok — засчитан (точно или с опечаткой), spell — опечатки, nature — типы ошибок */
+function gradeText(it, val) {
+  const gap = it.type === "gap";
+  if (isCorrect(it, val)) return { ok: true, spell: [], nature: null };
+  const a = analyzeTokens(tokens(val, gap), it.accepted.map(x => tokens(x, gap)), "en");
+  if (!a) return { ok: false, spell: [], nature: errNature(it, val) };
+  if (!a.extra.length && !a.miss.length && a.pairs.length && a.orderOk) return { ok: true, spell: a.pairs, nature: null };
+  return { ok: false, spell: a.pairs, nature: errNature(it, val) };
+}
+const SPELL_NOTE = "Опечатка не считается ошибкой: ответ засчитан как верный, а слово добавлено в раздел «Правописание».";
+const spellPairs = list => list.map(s => `<span class="mine">${esc(s.typed)}</span> → <b>${esc(s.right)}</b>`).join(", ");
+
+/* Что именно отличается от ближайшего варианта ключа: артикль, предлог, время/форма глагола или прочее (опечатки не считаются). */
 function errNature(it, val) {
   const topicNat = natOfCat(D.progress.topics[P?.key]?.category);
   if (it.type === "choice") return [topicNat];
-  const gap = it.type === "gap", u = tokens(val, gap);
-  let best = null, bd = Infinity;
-  for (const a of it.accepted) {
-    const tk = tokens(a, gap), d = bagDiff(u, tk).length + bagDiff(tk, u).length;
-    if (d < bd) { bd = d; best = tk; }
-  }
-  if (!best) return [topicNat];
-  const extra = bagDiff(u, best), miss = bagDiff(best, u);
-  if (!extra.length && !miss.length) return ["other"];
+  const gap = it.type === "gap", a = analyzeTokens(tokens(val, gap), it.accepted.map(x => tokens(x, gap)), "en");
+  if (!a) return [topicNat];
+  if (!a.extra.length && !a.miss.length) return ["other"];
   const set = new Set();
-  extra.forEach(x => set.add(classifyTok(x, miss)));
-  miss.forEach(x => set.add(classifyTok(x, extra)));
+  a.extra.forEach(x => set.add(classifyTok(x, a.miss)));
+  a.miss.forEach(x => set.add(classifyTok(x, a.extra)));
   return NAT_ORDER.filter(n => set.has(n));
 }
 
@@ -496,7 +552,7 @@ function playerView() {
   }
   body += `<div class="errmsg" id="err"></div>`;
   let dock;
-  if (r && practice) dock = `<div class="dock ${r.ok ? "right" : "wrong"}"><div class="dock-in"><h3>${r.ok ? "Верно!" : "Почти."}</h3><p>${r.ok ? "" : `Твой ответ: <span class="mine">${esc(r.val)}</span><br>Правильно: <b>${esc(expected(it))}</b><br>Ошибка в: ${natBadges(r.nature)}<br>`}${esc(it.explain || "")}</p><button class="btn ${r.ok ? "pri" : ""} wide" data-act="next">${P.i + 1 < P.items.length ? "Дальше" : "Завершить"}</button></div></div>`;
+  if (r && practice) dock = `<div class="dock ${r.ok ? "right" : "wrong"}"><div class="dock-in"><h3>${r.ok ? "Верно!" : "Почти."}</h3><p>${r.spell && r.spell.length ? `Правописание: ${spellPairs(r.spell)}.<br>${r.ok ? SPELL_NOTE + "<br>" : ""}` : ""}${r.ok ? "" : `Твой ответ: <span class="mine">${esc(r.val)}</span><br>Правильно: <b>${esc(expected(it))}</b><br>Ошибка в: ${natBadges(r.nature)}<br>`}${esc(it.explain || "")}</p><button class="btn ${r.ok ? "pri" : ""} wide" data-act="next">${P.i + 1 < P.items.length ? "Дальше" : "Завершить"}</button></div></div>`;
   else dock = `<div class="dock"><div class="dock-in"><button class="btn pri wide" data-act="${practice ? "check" : "next"}">${practice ? "Проверить" : (P.i + 1 < P.items.length ? "Дальше" : "Завершить тест")}</button></div></div>`;
   return `<div class="player">${head}${body}${dock}</div>`;
 }
@@ -514,9 +570,10 @@ function currentVal() {
 function commit() {
   const it = P.items[P.i], val = currentVal();
   if (!val) { $("#err").textContent = it.type === "choice" ? "Выбери вариант" : "Введи ответ"; return false; }
-  const ok = isCorrect(it, val);
+  const g = it.type === "choice" ? { ok: val === it.answer, spell: [], nature: val === it.answer ? null : errNature(it, val) } : gradeText(it, val);
   P.sel = val;                                   // ответ остаётся в поле после проверки
-  P.res[P.i] = { val, ok, nature: ok ? null : errNature(it, val) };
+  P.res[P.i] = { val, ok: g.ok, spell: g.spell, nature: g.nature };
+  if (g.spell.length) api("/api/spelling/record", { items: g.spell.map(s => ({ typed: s.typed, right: s.right, lang: "en", topic: P.key })) }).catch(() => {});
   return true;
 }
 
@@ -531,8 +588,10 @@ function practiceResult() {
 function natSummary() {
   const nat = { tense: 0, article: 0, prep: 0, other: 0 };
   P.res.forEach(r => { if (!r.ok) (r.nature && r.nature.length ? r.nature : ["other"]).forEach(n => { nat[n] += 1; }); });
-  if (!Object.values(nat).some(Boolean)) return "";
-  return `<div class="sec">Ошибки по типам</div><div class="grid4">${NAT_ORDER.map(n => `<div class="metric"><div class="small muted">${NAT[n]}</div><b>${nat[n]}</b></div>`).join("")}</div>`;
+  const spell = P.res.flatMap(r => r.spell || []);
+  const errs = Object.values(nat).some(Boolean) ? `<div class="sec">Ошибки по типам</div><div class="grid4">${NAT_ORDER.map(n => `<div class="metric"><div class="small muted">${NAT[n]}</div><b>${nat[n]}</b></div>`).join("")}</div>` : "";
+  const sp = spell.length ? `<div class="sec">Правописание</div><div class="card stack" style="--g:6px"><p>${spellPairs(spell)}</p><p class="small muted">Это опечатки, а не ошибки по теме: на оценку они не влияют. Слова добавлены в раздел «Правописание», там их можно потренировать.</p></div>` : "";
+  return errs + sp;
 }
 
 function testResult() {
@@ -540,6 +599,7 @@ function testResult() {
   const rows = items.map((it, i) => {
     const r = P.res[i];
     return `<div class="result-row"><div class="row between"><div class="q grow">${i + 1}. ${esc(it.prompt)}</div><span class="badge ${r.ok ? "ok" : "bad"}">${r.ok ? "верно" : "ошибка"}</span></div>
+      ${r.spell && r.spell.length ? `<p class="small" style="margin-top:4px"><span class="badge warn">правописание</span> ${spellPairs(r.spell)}${r.ok ? " · засчитано как верное" : ""}</p>` : ""}
       ${r.ok ? "" : `<p class="small" style="margin-top:4px">Ты: <span style="color:var(--bad)">${esc(r.val)}</span><br>Правильно: <b>${esc(expected(it))}</b></p><div class="row wrap" style="margin-top:4px"><span class="small muted">Ошибка в:</span> ${natBadges(r.nature)}</div>`}
       <p class="small muted">${esc(it.explain || "")}</p>
       ${!r.ok && it.type !== "choice" ? `<button class="btn small" style="margin-top:6px" data-act="review" data-i="${i}" ${r.sent ? "disabled" : ""}>${r.sent ? "Отправлено Claude" : "Мой вариант тоже верный"}</button>` : ""}</div>`;
@@ -550,7 +610,7 @@ function testResult() {
     <p class="muted">${R.passed ? `Стадия ${t.stage} из ${D.mastered_stage}. Следующая проверка: ${esc(t.next_review)}.` : `Нужно ${D.pass_score}%. Повтори урок и приходи завтра: ${esc(t.next_review)}.`}</p>
     <span class="chip" style="justify-content:center">+${R.xp_gained} XP</span></div>
     ${natSummary()}<div class="sec">Разбор</div><div class="card" style="padding:4px 16px">${rows}</div>
-    <p class="small muted" style="margin-top:10px">Балл посчитан по точному совпадению с ключом. Если твой вариант тоже верный, отправь его Claude: он проверит в чате.</p>
+    <p class="small muted" style="margin-top:10px">Балл посчитан по совпадению с ключом; опечатки в слове не снижают балл. Если твой вариант тоже верный, отправь его Claude: он проверит в чате.</p>
     <div class="stack" style="margin-top:14px;padding-bottom:20px"><button class="btn pri wide" data-act="close">На главную</button></div>`;
 }
 
@@ -580,6 +640,15 @@ const PRAISE = ["Молодец!", "Отлично!", "Верно, так дер
 const shuffle = a => { const r = a.slice(); for (let i = r.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [r[i], r[j]] = [r[j], r[i]]; } return r; };
 const normRu = s => String(s).toLowerCase().replace(/ё/g, "е").replace(/[.,;:!?()"«»'’\-—]/g, " ").replace(/\s+/g, " ").trim();
 const isRuOk = (w, val) => { const n = normRu(val); return !!n && w.accepted.some(a => normRu(a) === n); };
+/* Перевод с опечаткой в слове засчитывается; слово уходит в раздел «Правописание». */
+function gradeRu(w, val) {
+  if (isRuOk(w, val)) return { ok: true, spell: [] };
+  const n = normRu(val);
+  if (!n) return { ok: false, spell: [] };
+  const a = analyzeTokens(n.split(" "), w.accepted.map(x => normRu(x).split(" ")), "ru");
+  if (a && !a.extra.length && !a.miss.length && a.pairs.length && a.orderOk) return { ok: true, spell: a.pairs };
+  return { ok: false, spell: a ? a.pairs : [] };
+}
 
 let voiceChoice = "auto:US";
 try { voiceChoice = localStorage.getItem("voice") || "auto:" + (localStorage.getItem("accent") || "US"); } catch { /* без хранилища */ }
@@ -636,20 +705,20 @@ const spk = t => `<button class="spk" data-act="speak" data-w="${esc(t)}" aria-l
 
 function wordRow(w) {
   const s = vst(w.id), open = openW.has(w.id);
-  const src = w.source ? `<p class="small muted">Из интервью: «${esc(w.source.quote)}»</p>` : "";
+  const src = w.manual ? `<p class="small muted">Добавлено вручную${w.project === "manual" ? "" : " · " + esc(projOf(w.project).name)}</p>` : (w.source ? `<p class="small muted">Из интервью: «${esc(w.source.quote)}»</p>` : "");
   const details = !open ? "" : `<div class="stack" style="margin-top:10px;border-top:2px solid var(--line);padding-top:10px">
     ${w.example ? `<div class="row"><div class="grow"><p>${esc(w.example)}</p><p class="small muted">${esc(w.example_ru)}</p></div>${spk(w.example)}</div>` : ""}
     ${w.note ? `<p class="small">${esc(w.note)}</p>` : ""}${src}
     ${s.status === "learning" ? `<p class="small muted">Подряд верно: ${s.streak} из 3 (после трёх слово считается выученным).</p>` : ""}
-    <div class="btns">${s.status === "learning" ? `<button class="btn small pri" data-act="wstatus" data-id="${esc(w.id)}" data-s="learned">Выучил</button>` : `<button class="btn small" data-act="wstatus" data-id="${esc(w.id)}" data-s="learning">Добавить в изучение</button>`}</div></div>`;
+    <div class="btns">${s.status === "learning" ? `<button class="btn small pri" data-act="wstatus" data-id="${esc(w.id)}" data-s="learned">Выучил</button>` : `<button class="btn small" data-act="wstatus" data-id="${esc(w.id)}" data-s="learning">Добавить в изучение</button>`}${w.manual ? `<button class="btn small" data-act="vdel" data-id="${esc(w.id)}">Удалить слово</button>` : ""}</div></div>`;
   const cls = s.status === "learning" ? "warn" : s.status === "new" ? "" : "ok";
   return `<div class="card word"><div class="row"><div class="grow" data-act="wtoggle" data-id="${esc(w.id)}" style="cursor:pointer"><div class="q">${esc(w.en)}</div><div class="small muted">${esc(w.ru)}</div></div>
-    <span class="badge ${cls}">${VSTAT[s.status]}</span>${spk(w.en)}</div>${details}</div>`;
+    ${w.manual ? `<span class="badge acc">моё</span>` : ""}<span class="badge ${cls}">${VSTAT[s.status]}</span>${spk(w.en)}</div>${details}</div>`;
 }
 
 function vocabView() {
   const items = vitems();
-  if (!items.length) return `<div style="margin-top:6px"><h2>Словарь</h2></div><div class="card" style="margin-top:12px"><h3>Слов пока нет</h3><p class="muted" style="margin-top:6px">Слова появятся после разбора записи: Claude отберёт слова и выражения из твоих интервью.</p></div>`;
+  if (!items.length) return `<div style="margin-top:6px"><h2>Словарь</h2></div><div class="card stack" style="margin-top:12px"><h3>Слов пока нет</h3><p class="muted">Слова появятся после разбора записи: Claude отберёт слова и выражения из твоих интервью. Можно и добавить свои.</p><button class="btn pri" data-act="vaddopen">＋ Добавить слова</button></div>`;
   const by = s => items.filter(w => vst(w.id).status === s);
   const nL = by("learning").length, nD = by("learned").length + by("known").length, nN = by("new").length;
   const list = vtab === "learning" ? by("learning") : vtab === "learned" ? [...by("learned"), ...by("known")] : items;
@@ -657,13 +726,103 @@ function vocabView() {
   return `<div class="row between" style="margin-top:6px"><div><h2>Словарь</h2><p class="small muted">Слова и выражения из твоих интервью</p></div>
       <div class="row">${voiceSelect()}</div></div>
     <div class="grid3" style="margin-top:12px"><div class="metric"><div class="small muted">На изучении</div><b>${nL}</b></div><div class="metric"><div class="small muted">Выучено</div><b>${nD}</b></div><div class="metric"><div class="small muted">Новых</div><b>${nN}</b></div></div>
-    <div class="btns" style="margin-top:12px"><button class="btn pri" data-act="vtest" data-m="new">Тест на слова</button>
+    <div class="btns" style="margin-top:12px"><button class="btn pri" data-act="vtest" data-m="new">Тест на слова</button><button class="btn" data-act="vaddopen">＋ Добавить слова</button>
       <button class="btn acc" data-act="vcards" ${nL ? "" : "disabled"}>Учить карточки${nL ? ` (${nL})` : ""}</button>
       <button class="btn" data-act="vtest" data-m="review" ${nL ? "" : "disabled"}>Повторить словарь</button></div>
     <p class="small muted" style="margin-top:8px">Произношение: синтезированный английский голос вашего устройства (это не запись живого диктора). Голос можно выбрать справа вверху${(() => { const n = voiceList.filter(v => v.lang.toLowerCase().startsWith("en") && !VOICE_JUNK.some(j => v.name.includes(j))).length; return n <= 2 ? `. Сейчас доступно обычных английских голосов: ${n}. Больше голосов можно скачать в настройках системы (macOS: Системные настройки → Универсальный доступ → Устный контент → Системный голос → Управлять голосами), после этого обнови страницу` : ""; })()}.</p>
     <div class="seg" style="margin-top:14px">${seg("learning", `На изучении (${nL})`)}${seg("learned", `Выучено (${nD})`)}${seg("all", `Все (${items.length})`)}</div>
     <div class="stack" style="margin-top:12px">${list.length ? list.map(wordRow).join("") : `<div class="card"><p class="muted">${vtab === "learning" ? "Здесь появятся слова, на которых ты ошибся в тесте. Пока пусто: пройди тест на слова." : "Пока пусто."}</p></div>`}</div>`;
 }
+
+
+/* --- добавление слов вручную (пачкой) --- */
+let VA = null;
+const slugEn = s => s.toLowerCase().replace(/[^a-z0-9а-яё]+/g, "-").replace(/^-+|-+$/g, "");
+const hasCyr = s => /[А-Яа-яЁё]/.test(s), hasLat = s => /[A-Za-z]/.test(s);
+
+/* Строка: «слово - перевод», «слово | перевод | пример | перевод примера», «слово: перевод», «слово = перевод», колонки через Tab.
+   В переводе несколько вариантов через запятую, точку с запятой или слэш. */
+function parseLine(raw) {
+  let line = raw.trim();
+  if (!line || line.startsWith("#")) return null;
+  let en, ru, ex = "", exru = "";
+  const segs = line.split("|").map(x => x.trim());
+  const dash = /^(.*?)(?:\t+|\s[-–—]\s|\s?[–—]\s?|\s?=\s?|:\s)(.+)$/;
+  const m0 = segs[0].match(dash);
+  if (m0 && segs.length >= 1) {
+    en = m0[1].trim(); ru = m0[2].trim(); ex = segs[1] || ""; exru = segs[2] || "";
+  } else if (segs.length >= 2) {
+    [en, ru, ex = "", exru = ""] = segs;
+  } else {
+    return { raw, error: "нужен перевод: слово - перевод" };
+  }
+  if (hasCyr(en) && !hasCyr(ru) && hasLat(ru)) [en, ru] = [ru, en];          // перепутан порядок
+  if (!en || !ru) return { raw, error: "нужны слово и перевод" };
+  if (!hasLat(en)) return { raw, error: "слово должно быть на английском" };
+  if (!hasCyr(ru) && !hasLat(ru)) return { raw, error: "перевод пустой" };
+  const parts = ru.split(/[,;/]/).map(x => x.trim()).filter(Boolean);
+  const accepted = [...new Set([ru, ...parts, ...parts.map(x => x.replace(/\s*\([^)]*\)\s*/g, " ").trim()).filter(Boolean)])];
+  return { raw, en, ru, accepted, example: ex, example_ru: exru };
+}
+
+function parseWords(text) {
+  const out = text.split(/\r?\n/).map(parseLine).filter(Boolean);
+  const seen = new Set();
+  out.forEach(w => {
+    if (w.error) return;
+    const key = slugEn(w.en);
+    if (seen.has(key)) { w.error = "повтор в списке"; return; }
+    seen.add(key);
+    const ex = vitems().find(i => slugEn(i.en) === key);
+    if (ex) w.exists = ex;
+  });
+  return out;
+}
+
+function previewHtml(list) {
+  if (!list.length) return `<p class="small muted">Введи слова, и здесь появится проверка.</p>`;
+  const ok = list.filter(w => !w.error), bad = list.length - ok.length;
+  const dup = ok.filter(w => w.exists && !(w.exists.manual && w.exists.project === VA.project)).length;
+  return `<p class="small"><b>Слов: ${ok.length}</b>${dup ? ` · уже в словаре: ${dup} (поставим на изучение)` : ""}${bad ? ` · <span style="color:var(--bad)">с ошибками: ${bad}</span>` : ""}</p>
+    <div class="card" style="padding:4px 14px">${list.map((w, i) => w.error
+      ? `<div class="result-row"><div class="small" style="color:var(--bad)">Строка ${i + 1}: ${esc(w.error)}</div><div class="small muted">${esc(w.raw)}</div></div>`
+      : `<div class="result-row row"><div class="grow"><div class="q">${esc(w.en)}</div><div class="small muted">${esc(w.ru)}</div></div>${w.exists ? (w.exists.manual && w.exists.project === VA.project ? `<span class="badge warn">обновим</span>` : `<span class="badge">уже есть</span>`) : `<span class="badge ok">новое</span>`}</div>`).join("")}</div>`;
+}
+
+function vaddView() {
+  const ps = Object.keys(projects());
+  return `<div class="row" style="margin-top:6px"><button class="x-btn" data-act="vaddcancel" aria-label="Назад">‹</button><div class="grow"><h2>Добавить слова</h2><p class="small muted">Каждое новое слово считается незнакомым: оно попадёт в «На изучении» и будет в тестах.</p></div></div>
+    <div class="stack" style="margin-top:12px">
+    <div class="card stack"><label class="small muted">Куда добавить</label>
+      <select class="field" id="vproj"><option value="manual" ${VA.project === "manual" ? "selected" : ""}>Мои слова (без проекта)</option>${ps.map(pid => `<option value="${esc(pid)}" ${VA.project === pid ? "selected" : ""}>Проект: ${esc(projOf(pid).name)}</option>`).join("")}</select></div>
+    <div class="card stack"><label class="small muted">Слова: по одному на строке (до 200)</label>
+      <textarea class="field" id="vtext" rows="9" spellcheck="false" placeholder="subject - объект съёмки&#10;take part in - принимать участие, участвовать&#10;flicker | мерцание | There is no flicker. | Мерцания нет.">${esc(VA.text)}</textarea>
+      <p class="small muted">Формат строки: <code>слово - перевод</code> (или <code>=</code>, <code>:</code>, Tab). Несколько переводов через запятую. Пример и его перевод через <code>|</code>. Строки со знаком <code>#</code> в начале пропускаются.</p></div>
+    <div id="vpreview">${previewHtml(VA.parsed)}</div>
+    <div class="errmsg" id="vaerr">${esc(VA.err || "")}</div>
+    <button class="btn pri wide" data-act="vaddsave">Добавить в словарь</button></div>`;
+}
+
+function bindVadd() {
+  const ta = $("#vtext");
+  if (ta) ta.addEventListener("input", () => { VA.text = ta.value; VA.parsed = parseWords(VA.text); VA.err = ""; $("#vpreview").innerHTML = previewHtml(VA.parsed); $("#vaerr").textContent = ""; });
+  const sel = $("#vproj");
+  if (sel) sel.addEventListener("change", () => { VA.project = sel.value; VA.parsed = parseWords(VA.text); $("#vpreview").innerHTML = previewHtml(VA.parsed); });
+}
+
+async function vaddSave() {
+  const ok = VA.parsed.filter(w => !w.error);
+  if (!ok.length) { VA.err = "Нет слов для добавления: проверь формат строк."; $("#vaerr").textContent = VA.err; return; }
+  try {
+    const r = await api("/api/vocab/add", { project: VA.project, words: ok.map(w => ({ en: w.en, ru: w.ru, accepted: w.accepted, example: w.example, example_ru: w.example_ru })) });
+    const bad = VA.parsed.length - ok.length;
+    VA = null; vtab = "learning"; view = "vocab";
+    await load();
+    toast(`Добавлено: ${r.added.length}${r.updated.length ? `, обновлено: ${r.updated.length}` : ""}${r.marked.length ? `, уже были и поставлены на изучение: ${r.marked.length}` : ""}${bad ? `, пропущено строк: ${bad}` : ""}`);
+  } catch (e) { VA.err = e.message; $("#vaerr").textContent = e.message; }
+}
+
+function openVadd() { VA = { text: "", project: "manual", parsed: [], err: "" }; view = "vadd"; render(); }
 
 /* --- тест на слова --- */
 function startVTest(mode) {
@@ -675,7 +834,7 @@ function startVTest(mode) {
   let pick;
   if (mode === "review") pick = learning.slice(0, 10);
   else {
-    pick = learning.slice(0, 4);
+    pick = learning.slice(0, 5);
     for (const w of fresh) { if (pick.length >= 10) break; pick.push(w); }
     for (const w of done) { if (pick.length >= 10) break; pick.push(w); }
   }
@@ -697,7 +856,7 @@ function vplayerView() {
   if (r) {
     const others = w.accepted.filter(a => normRu(a) !== normRu(w.ru)).slice(0, 3);
     dock = `<div class="dock ${r.ok ? "right" : "wrong"}"><div class="dock-in"><h3>${r.ok ? PRAISE[Math.floor(Math.random() * PRAISE.length)] + " 🎉" : "Пока нет. Перевод:"}</h3>
-      <p><b>${esc(w.ru)}</b>${others.length ? `<span class="small"> · также: ${esc(others.join(", "))}</span>` : ""}${w.example ? `<br><span class="small">${esc(w.example)} — ${esc(w.example_ru)}</span>` : ""}${r.ok ? "" : `<br><span class="small">Слово добавлено в твой словарь.</span>`}</p>
+      <p>${r.spell && r.spell.length ? `<span class="small">Правописание: ${spellPairs(r.spell)}.${r.ok ? " " + SPELL_NOTE : ""}</span><br>` : ""}<b>${esc(w.ru)}</b>${others.length ? `<span class="small"> · также: ${esc(others.join(", "))}</span>` : ""}${w.example ? `<br><span class="small">${esc(w.example)} — ${esc(w.example_ru)}</span>` : ""}${r.ok ? "" : `<br><span class="small">Слово добавлено в твой словарь.</span>`}</p>
       <div class="btns">${!r.ok ? `<button class="btn small" data-act="vclaim">Мой вариант тоже верный</button>` : ""}<button class="btn ${r.ok ? "pri" : ""} grow" data-act="vnext">${V.i + 1 < n ? "Дальше" : "Завершить"}</button></div></div></div>`;
   } else dock = `<div class="dock"><div class="dock-in"><button class="btn pri wide" data-act="vcheck">Проверить</button></div></div>`;
   return `<div class="player">${vhead(n, V.i, `${V.i + 1}/${n}`)}
@@ -715,7 +874,10 @@ function bindV() {
 function vcheck() {
   const w = V.items[V.i], val = ($(".answer-input")?.value || "").trim();
   if (!val) { $("#verr").textContent = "Введи перевод"; return; }
-  V.val = val; V.res[V.i] = { val, ok: isRuOk(w, val), claimed: false }; V.checked = true; render();
+  V.val = val; const g = gradeRu(w, val);
+  V.res[V.i] = { val, ok: g.ok, spell: g.spell, claimed: false }; V.checked = true;
+  if (g.spell.length) api("/api/spelling/record", { items: g.spell.map(s => ({ typed: s.typed, right: s.right, lang: "ru", ctx: w.en })) }).catch(() => {});
+  render();
 }
 
 async function postWord(w, ok, claimed, answer) {
@@ -743,6 +905,7 @@ function vresult() {
   const xp = ok * 2 + (V.bonus || 0);
   return `<div class="stack center" style="padding-top:20px"><div class="big">${ok} из ${n}</div>
     <p class="muted">${bad.length ? `Неизвестные слова (${bad.length}) добавлены в твой словарь.` : "Все слова на месте. Молодец!"}</p><span class="chip" style="justify-content:center">+${xp} XP</span></div>
+    ${V.res.some(x => x.spell && x.spell.length) ? `<div class="sec">Правописание</div><div class="card stack" style="--g:6px"><p>${spellPairs(V.res.flatMap(x => x.spell || []))}</p><p class="small muted">Опечатки не считаются ошибками. Слова добавлены в раздел «Правописание».</p></div>` : ""}
     ${bad.length ? `<div class="sec">Добавлено в словарь</div><div class="card" style="padding:4px 16px">${bad.map(w => `<div class="result-row row"><div class="grow"><div class="q">${esc(w.en)}</div><div class="small muted">${esc(w.ru)}</div></div>${spk(w.en)}</div>`).join("")}</div>` : ""}
     <div class="stack" style="margin-top:16px;padding-bottom:20px"><button class="btn pri wide" data-act="vopen">Открыть словарь</button><button class="btn wide" data-act="vtest" data-m="${V.mode}">Ещё тест</button></div>`;
 }
@@ -781,10 +944,87 @@ async function cardAnswer(ok) {
 
 function closeVocab() { V = null; C = null; view = "vocab"; load(); }
 
+/* ---------- правописание: слова с опечатками и тренировка написания ---------- */
+let SD = null;
+const spWords = () => Object.entries(D?.spelling?.words || {}).map(([id, w]) => ({ id, ...w }));
+const normSp = s => String(s).toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
+
+function spRow(w) {
+  const typed = Object.entries(w.typed || {}).sort((a, b) => b[1] - a[1]).map(([k, n]) => `<span class="mine">${esc(k)}</span>${n > 1 ? ` ×${n}` : ""}`).join(", ");
+  const tn = w.topic && D.progress.topics[w.topic] ? D.progress.topics[w.topic].name : "";
+  return `<div class="card word"><div class="row"><div class="grow"><div class="q">${esc(w.right)}</div>
+    <div class="small muted">Писал: ${typed}${w.lang === "ru" && w.ctx ? ` · к слову «${esc(w.ctx)}»` : ""}${tn ? ` · ${esc(tn)}` : ""}</div>
+    ${w.status === "learning" ? `<div class="small muted">Подряд верно: ${w.streak} из 3</div>` : ""}</div>
+    <span class="badge ${w.status === "fixed" ? "ok" : "warn"}">${w.status === "fixed" ? "исправлено" : "учу"}</span>${w.lang === "en" ? spk(w.right) : ""}
+    <button class="btn small" data-act="spstatus" data-id="${esc(w.id)}" data-s="${w.status === "fixed" ? "learning" : "fixed"}">${w.status === "fixed" ? "Вернуть" : "Знаю"}</button></div></div>`;
+}
+
+function spellingView() {
+  const all = spWords().sort((a, b) => (b.last || "").localeCompare(a.last || "")), lrn = all.filter(w => w.status === "learning"), fix = all.filter(w => w.status === "fixed");
+  const head = `<div style="margin-top:6px"><h2>Правописание</h2><p class="small muted">Слова, в которых ты ошибся в написании. Опечатка не считается ошибкой по теме: ответ в тесте засчитывается, а слово попадает сюда.</p></div>`;
+  if (!all.length) return head + `<div class="card stack" style="margin-top:12px"><h3>Опечаток пока нет</h3><p class="muted">Если в тесте или тесте на слова ты неверно напишешь одну-две буквы в слове, оно появится здесь с правильным написанием, и его можно будет потренировать на слух.</p></div>`;
+  return head + `<div class="grid3" style="margin-top:12px"><div class="metric"><div class="small muted">Учу</div><b>${lrn.length}</b></div><div class="metric"><div class="small muted">Исправлено</div><b>${fix.length}</b></div><div class="metric"><div class="small muted">Всего</div><b>${all.length}</b></div></div>
+    <div class="btns" style="margin-top:12px"><button class="btn pri" data-act="sdstart" ${lrn.length ? "" : "disabled"}>Тренировка написания${lrn.length ? ` (${Math.min(10, lrn.length)})` : ""}</button></div>
+    <p class="small muted" style="margin-top:8px">Тренировка: английское слово произносится, его нужно написать; русское: перевод по английскому слову. После трёх верных ответов подряд слово считается исправленным.</p>
+    ${lrn.length ? `<div class="sec">Учу (${lrn.length})</div><div class="stack">${lrn.map(spRow).join("")}</div>` : ""}
+    ${fix.length ? `<div class="sec">Исправлено (${fix.length})</div><div class="stack">${fix.map(spRow).join("")}</div>` : ""}`;
+}
+
+function startSD() {
+  const items = spWords().filter(w => w.status === "learning").sort((a, b) => (a.last || "").localeCompare(b.last || "")).slice(0, 10);
+  if (!items.length) { toast("Нет слов на тренировку."); return; }
+  SD = { items: shuffle(items), i: 0, res: [], checked: false, val: "", phase: "run", spoken: -1 };
+  render();
+}
+function sdView() {
+  const n = SD.items.length, head = vhead(n, SD.phase === "done" ? n : SD.i, SD.phase === "done" ? `${n}/${n}` : `${SD.i + 1}/${n}`);
+  if (SD.phase === "done") {
+    const ok = SD.res.filter(x => x.ok).length;
+    return `<div class="player">${head}<div class="stack center" style="padding-top:20px"><div class="big">${ok} из ${n}</div><p class="muted">${ok === n ? "Все слова написаны верно!" : "Ошибочные слова остаются на тренировке."}</p><span class="chip" style="justify-content:center">+${ok * 2} XP</span></div>
+      <div class="stack" style="margin-top:16px;padding-bottom:20px"><button class="btn pri wide" data-act="sdclose">К правописанию</button><button class="btn wide" data-act="sdstart">Ещё раз</button></div></div>`;
+  }
+  const w = SD.items[SD.i], r = SD.checked ? SD.res[SD.i] : null, cls = r ? (r.ok ? " right" : " wrong") : "";
+  const prompt = w.lang === "en" ? `<div class="prompt row" style="justify-content:space-between"><span>Послушай и напиши</span>${spk(w.right)}</div><p class="sub">Слово из ${w.right.length} букв</p>`
+    : `<div class="prompt">${esc(w.ctx || "Напиши слово")}</div><p class="sub">Напиши перевод на русский, слово из ${w.right.length} букв</p>`;
+  const dock = r ? `<div class="dock ${r.ok ? "right" : "wrong"}"><div class="dock-in"><h3>${r.ok ? "Верно!" : "Пока нет."}</h3><p>${r.ok ? "" : `Ты написал: <span class="mine">${esc(r.val)}</span><br>`}Правильно: <b>${esc(w.right)}</b></p><button class="btn ${r.ok ? "pri" : ""} wide" data-act="sdnext">${SD.i + 1 < n ? "Дальше" : "Завершить"}</button></div></div>`
+    : `<div class="dock"><div class="dock-in"><button class="btn pri wide" data-act="sdcheck">Проверить</button></div></div>`;
+  return `<div class="player">${head}${prompt}<input class="answer-input${cls}" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Напиши слово" value="${esc(SD.val || "")}" ${r ? "disabled" : ""}><div class="errmsg" id="sderr"></div>${dock}</div>`;
+}
+function bindSD() {
+  const inp = $(".answer-input");
+  if (inp && !inp.disabled) { setTimeout(() => inp.focus(), 30); inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (!e.repeat) act("sdcheck"); } }); }
+  if (SD.phase === "run" && !SD.checked && SD.spoken !== SD.i) { SD.spoken = SD.i; const w = SD.items[SD.i]; if (w.lang === "en") speak(w.right); }
+}
+function sdCheck() {
+  const w = SD.items[SD.i], val = ($(".answer-input")?.value || "").trim();
+  if (!val) { $("#sderr").textContent = "Напиши слово"; return; }
+  SD.val = val; SD.res[SD.i] = { val, ok: normSp(val) === normSp(w.right) }; SD.checked = true; render();
+}
+async function sdNext() {
+  const w = SD.items[SD.i], r = SD.res[SD.i];
+  try { const x = await api("/api/spelling/answer", { id: w.id, ok: r.ok }); D.spelling.words[w.id] = x.word; D.game = x.game; } catch (e) { toast(e.message); }
+  SD.i += 1; SD.checked = false; SD.val = "";
+  if (SD.i >= SD.items.length) { SD.i = SD.items.length - 1; SD.phase = "done"; }
+  render();
+}
+function closeSD() { SD = null; view = "spelling"; load(); }
+
 /* ---------- действия ---------- */
 async function act(a, el) {
-  if (a === "tab") { view = el.dataset.v; render(); }
+  if (a === "sdstart") startSD();
+  else if (a === "sdcheck") sdCheck();
+  else if (a === "sdnext") sdNext();
+  else if (a === "sdclose") closeSD();
+  else if (a === "spstatus") { try { const r = await api("/api/spelling/status", { id: el.dataset.id, status: el.dataset.s }); D.spelling.words[el.dataset.id] = r.word; render(true); } catch (e) { toast(e.message); } }
+  else if (a === "tab") { view = el.dataset.v; render(); }
   else if (a === "speak") speak(el.dataset.w);
+  else if (a === "vaddopen") openVadd();
+  else if (a === "vaddcancel") { VA = null; view = "vocab"; render(); }
+  else if (a === "vaddsave") vaddSave();
+  else if (a === "vdel") {
+    if (!window.confirm("Удалить это слово из словаря?")) return;
+    try { await api("/api/vocab/delete", { id: el.dataset.id }); openW.delete(el.dataset.id); await load(); toast("Слово удалено."); } catch (e) { toast(e.message); }
+  }
   else if (a === "tnat") { tnat = el.dataset.v; render(true); }
   else if (a === "vtab") { vtab = el.dataset.v; render(true); }
   else if (a === "wtoggle") { const id = el.dataset.id; if (openW.has(id)) openW.delete(id); else openW.add(id); render(true); }
@@ -837,7 +1077,9 @@ document.addEventListener("click", e => {
 });
 document.addEventListener("keydown", e => {
   if (e.key === "Enter" && e.repeat) return;
-  if (e.key === "Escape" && (V || C)) closeVocab();
+  if (e.key === "Escape" && SD) closeSD();
+  else if (e.key === "Enter" && SD && SD.phase === "run" && SD.checked && document.activeElement?.tagName !== "BUTTON") act("sdnext");
+  else if (e.key === "Escape" && (V || C)) closeVocab();
   else if (e.key === "Enter" && V && V.phase === "run" && V.checked && document.activeElement?.tagName !== "BUTTON") act("vnext");
   else if (e.key === "Escape" && P && P.phase !== "done") closePlayer();
   else if (e.key === "Enter" && P && P.phase === "run" && P.mode === "practice" && P.checked && document.activeElement?.tagName !== "BUTTON") act("next");

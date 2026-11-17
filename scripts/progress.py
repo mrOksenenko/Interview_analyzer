@@ -337,7 +337,7 @@ def cmd_vocab_check() -> int:
             bad += 1
             continue
         pid, seen = data.get("project"), set()
-        if pid not in state["projects"]:
+        if pid != "manual" and pid not in state["projects"]:
             print(f"{f.name}: проект '{pid}' не существует", file=sys.stderr)
             bad += 1
         for it in data.get("items", []):

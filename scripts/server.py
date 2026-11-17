@@ -15,6 +15,11 @@ API:
     POST /api/vocab/answer              {id, ok, claimed?, answer?} → статус слова, XP
     POST /api/vocab/status              {id, status: learning|learned|known}
     POST /api/vocab/finish              {correct} → бонус за завершённый тест слов
+    POST /api/vocab/add                 {project, words:[{en,ru,accepted?,example?,example_ru?}]} → пачка слов «на изучение»
+    POST /api/vocab/delete              {id} → удалить слово, добавленное вручную
+    POST /api/spelling/record           {items:[{typed,right,lang,topic?,ctx?}]} → слова с опечатками в раздел «Правописание»
+    POST /api/spelling/answer           {id, ok} → ответ в тренировке написания, XP
+    POST /api/spelling/status           {id, status: learning|fixed}
 """
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ INBOX = P.PROG / "inbox"
 GAME = P.PROG / "game.json"
 VOCAB_DIR = P.PROG / "vocab"
 VOCAB_STATE = P.PROG / "vocab_state.json"
+SPELLING = P.PROG / "spelling.json"
 VENV_PY = P.ROOT / ".venv" / "bin" / "python"
 LOCK = threading.Lock()
 JOBS: dict = {}                     # session_id → {stage, pos, dur, error, started}
@@ -59,6 +65,7 @@ DEVICES = {"auto", "cpu", "mps"}
 TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".json": "application/json"}
 XP_PER_LEVEL = 100
+MAX_MANUAL_WORDS = 200
 TOPIC_RE = re.compile(r"[a-z0-9а-яё-]+/(grammar|knowledge):[a-z0-9а-яё-]+")
 
 
@@ -120,6 +127,7 @@ def build_state() -> dict:
     return {"progress": state, "game": game_view(load_game()), "sessions": sessions,
             "pending": pending_view(state), "jobs": JOBS,
             "vocab": {"items": load_vocab_items(), "state": load_vocab_state()},
+            "spelling": load_spelling(),
             "due": [k for k, _ in P.due_topics(state)], "lessons": lessons,
             "today": dt.date.today().isoformat(), "pass_score": P.PASS_SCORE,
             "mastered_stage": P.MASTERED_STAGE}
@@ -155,7 +163,7 @@ def load_vocab_items() -> list:
             out.append({"id": vid, "project": pid, "en": en, "kind": it.get("kind", "word"), "ru": ru,
                         "accepted": list(dict.fromkeys(acc)), "example": it.get("example", ""),
                         "example_ru": it.get("example_ru", ""), "note": it.get("note", ""),
-                        "source": it.get("source")})
+                        "source": it.get("source"), "manual": bool(it.get("manual"))})
     return out
 
 
@@ -173,8 +181,92 @@ def save_vocab_state(vs: dict) -> None:
     VOCAB_STATE.write_text(json.dumps(vs, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _clean(s, n: int) -> str:
+    return " ".join(str(s or "").split())[:n]
+
+
 def vocab_word(vs: dict, vid: str) -> dict:
     return vs["words"].setdefault(vid, {"status": "new", "seen": 0, "correct": 0, "wrong": 0, "streak": 0, "last": None})
+
+
+# ---------- правописание ----------
+MAX_SPELL_ITEMS = 30
+
+
+def load_spelling() -> dict:
+    if SPELLING.exists():
+        try:
+            data = json.loads(SPELLING.read_text(encoding="utf-8"))
+            if isinstance(data.get("words"), dict):
+                return data
+        except ValueError:
+            pass
+    return {"words": {}}
+
+
+def save_spelling(sp: dict) -> None:
+    P.PROG.mkdir(parents=True, exist_ok=True)
+    SPELLING.write_text(json.dumps(sp, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _spelling(self, path: str, body: dict) -> None:
+    """Раздел «Правописание». Вызывается под LOCK."""
+    sp, today = load_spelling(), dt.date.today().isoformat()
+    if path == "/api/spelling/record":
+        items = body.get("items")
+        if not isinstance(items, list) or len(items) > MAX_SPELL_ITEMS:
+            return self._json(400, {"error": "bad items"})
+        n = 0
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            lang = "ru" if it.get("lang") == "ru" else "en"
+            right, typed = _clean(it.get("right"), 60).lower(), _clean(it.get("typed"), 60).lower()
+            if not right or not typed or right == typed:
+                continue
+            w = sp["words"].setdefault(f"{lang}:{right}", {
+                "right": right, "lang": lang, "typed": {}, "count": 0, "first": today, "last": today,
+                "streak": 0, "status": "learning", "topic": "", "ctx": ""})
+            w["typed"][typed] = w["typed"].get(typed, 0) + 1
+            w["count"] += 1
+            w["last"] = today
+            w["streak"] = 0
+            w["status"] = "learning"            # ошибся снова: слово опять на тренировку
+            if it.get("topic") and TOPIC_RE.fullmatch(str(it["topic"])):
+                w["topic"] = str(it["topic"])
+            if it.get("ctx"):
+                w["ctx"] = _clean(it["ctx"], 80)
+            n += 1
+        save_spelling(sp)
+        return self._json(200, {"recorded": n, "words": len(sp["words"])})
+    wid = str(body.get("id", ""))
+    w = sp["words"].get(wid)
+    if not w:
+        return self._json(404, {"error": "unknown word"})
+    if path == "/api/spelling/answer":
+        game, ok = load_game(), bool(body.get("ok"))
+        w["last"] = today
+        if ok:
+            w["streak"] += 1
+            if w["streak"] >= 3:
+                w["status"] = "fixed"
+        else:
+            w["streak"] = 0
+            w["status"] = "learning"
+        gained = 2 if ok else 0
+        award(game, gained)
+        save_game(game)
+        save_spelling(sp)
+        return self._json(200, {"word": w, "xp_gained": gained, "game": game_view(game)})
+    if path == "/api/spelling/status":
+        st = body.get("status")
+        if st not in ("learning", "fixed"):
+            return self._json(400, {"error": "bad status"})
+        w["status"] = st
+        w["streak"] = 3 if st == "fixed" else 0
+        save_spelling(sp)
+        return self._json(200, {"word": w})
+    return self._json(404, {"error": "not found"})
 
 
 # ---------- расшифровка в фоне ----------
@@ -360,8 +452,94 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             tmp.unlink(missing_ok=True)
 
+    def _vocab_add(self, body: dict) -> None:
+        """Пачка слов, добавленных вручную: идут в «на изучении» (как неизвестные). Под LOCK."""
+        pid = str(body.get("project") or "manual")
+        if pid != "manual" and pid not in P.load()["projects"]:
+            return self._json(404, {"error": "Такого проекта нет."})
+        words = body.get("words")
+        if not isinstance(words, list) or not words:
+            return self._json(400, {"error": "Список слов пуст."})
+        if len(words) > MAX_MANUAL_WORDS:
+            return self._json(400, {"error": f"За раз можно добавить не больше {MAX_MANUAL_WORDS} слов."})
+        VOCAB_DIR.mkdir(parents=True, exist_ok=True)
+        f = VOCAB_DIR / f"{pid}.vocab.json"
+        try:
+            data = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {"project": pid, "items": []}
+        except ValueError:
+            return self._json(500, {"error": "Файл словаря повреждён."})
+        data.setdefault("items", [])
+        known = {P.slug(i["en"]): i for i in load_vocab_items()}
+        in_file = {P.slug(x.get("en", "")): x for x in data["items"]}
+        vs, today = load_vocab_state(), dt.date.today().isoformat()
+        res = {"added": [], "updated": [], "marked": [], "skipped": []}
+
+        def mark(vid: str) -> None:
+            w = vocab_word(vs, vid)
+            w["status"], w["streak"] = "learning", 0
+            w["added"] = w.get("added") or today
+
+        for n, w in enumerate(words, 1):
+            if not isinstance(w, dict):
+                res["skipped"].append({"n": n, "reason": "не слово"})
+                continue
+            en, ru = _clean(w.get("en"), 80), _clean(w.get("ru"), 200)
+            if not en or not ru or not re.search(r"[A-Za-z]", en):
+                res["skipped"].append({"n": n, "reason": "нужны английское слово и перевод"})
+                continue
+            acc = [_clean(a, 200) for a in (w.get("accepted") or []) if isinstance(a, str)]
+            acc = list(dict.fromkeys([ru] + [a for a in acc if a]))[:30]
+            entry = {"en": en, "kind": "phrase" if " " in en else "word", "ru": ru, "accepted": acc,
+                     "example": _clean(w.get("example"), 300), "example_ru": _clean(w.get("example_ru"), 300),
+                     "manual": True}
+            note = _clean(w.get("note"), 300)
+            if note:
+                entry["note"] = note
+            slug = P.slug(en)
+            found = known.get(slug)
+            if found and not (found.get("manual") and found["project"] == pid):
+                mark(found["id"])                  # слово уже есть (например из интервью): ставим на изучение
+                res["marked"].append(found["id"])
+                continue
+            vid = f"{pid}/{slug}"
+            if slug in in_file:                    # своё слово: обновляем перевод
+                in_file[slug].update(entry)
+                res["updated"].append(vid)
+            else:
+                entry["added"] = today
+                data["items"].append(entry)
+                in_file[slug] = entry
+                res["added"].append(vid)
+            mark(vid)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, f)
+        save_vocab_state(vs)
+        return self._json(200, res)
+
+    def _vocab_delete(self, body: dict) -> None:
+        """Удаляет только слово, добавленное вручную. Под LOCK."""
+        vid = str(body.get("id", ""))
+        item = next((i for i in load_vocab_items() if i["id"] == vid), None)
+        if not item or not item.get("manual"):
+            return self._json(404, {"error": "Удалять можно только слова, добавленные вручную."})
+        f = VOCAB_DIR / f"{item['project']}.vocab.json"
+        data = json.loads(f.read_text(encoding="utf-8"))
+        data["items"] = [x for x in data.get("items", []) if P.slug(x.get("en", "")) != vid.split("/", 1)[1]]
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, f)
+        vs = load_vocab_state()
+        vs["words"].pop(vid, None)
+        save_vocab_state(vs)
+        return self._json(200, {"ok": True})
+
     def _vocab(self, path: str, body: dict) -> None:
         """Ответы на слова. Вызывается под LOCK."""
+        if path == "/api/vocab/add":
+            return self._vocab_add(body)
+        if path == "/api/vocab/delete":
+            return self._vocab_delete(body)
         vid = str(body.get("id", ""))
         if path != "/api/vocab/finish" and vid not in {i["id"] for i in load_vocab_items()}:
             return self._json(404, {"error": "unknown word"})
@@ -440,6 +618,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True})
             if path.startswith("/api/vocab/"):
                 return self._vocab(path, body)
+            if path.startswith("/api/spelling/"):
+                return _spelling(self, path, body)
             topic = body.get("topic")
             if topic not in state["topics"]:
                 return self._json(404, {"error": "unknown topic"})

@@ -33,8 +33,8 @@ p{margin:0}
 .xpbar{width:54px;height:6px;border-radius:3px;background:var(--track);overflow:hidden}
 .xpbar>i{display:block;height:100%;background:var(--acc)}
 
-.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:2px solid var(--line);display:flex;justify-content:center;gap:6px;padding:8px 12px calc(8px + env(safe-area-inset-bottom));z-index:6}
-.tab{flex:1;max-width:200px;border:0;background:none;color:var(--muted);font:700 13px/1.2 sans-serif;font-family:inherit;padding:8px 6px;border-radius:12px;cursor:pointer}
+.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:2px solid var(--line);display:flex;justify-content:center;gap:6px;padding:8px 6px calc(8px + env(safe-area-inset-bottom));z-index:6}
+.tab{flex:1;min-width:0;max-width:200px;border:0;background:none;color:var(--muted);font:700 13px/1.2 sans-serif;font-family:inherit;padding:8px 6px;border-radius:12px;cursor:pointer}
 .tab.on{background:var(--acc-bg);color:var(--acc-t)}
 .tab span{display:block;font-size:20px}
 
